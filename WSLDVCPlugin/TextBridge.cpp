@@ -28,7 +28,7 @@ namespace
     // client→server PDU 在此回调，原样写往 weston 的 C2S 通道。
     // 返回 true 表示数据已消费。
     bool
-    ForwardClientToServer(winrt::com_array<uint8_t> const& pdu)
+    ForwardClientToServer(winrt::array_view<uint8_t const> const& pdu)
     {
         DebugPrint(L"TextBridge: pduForwarder %u bytes\n", static_cast<ULONG>(pdu.size()));
         if (!g_spC2SChannel)
