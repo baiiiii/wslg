@@ -62,26 +62,6 @@ namespace
     {
         DWORD pid;
         std::set<DWORD> tids;
-    };
-
-    BOOL
-    CALLBACK
-    CollectRemoteUiThread(HWND hwnd, LPARAM lParam)
-    {
-        auto* ctx = reinterpret_cast<EnumContext*>(lParam);
-        DWORD pid = 0;
-        DWORD tid = GetWindowThreadProcessId(hwnd, &pid);
-        if (pid == ctx->pid && IsWindowVisible(hwnd))
-        {
-            ctx->tids.insert(tid);
-        }
-        return TRUE;
-    }
-
-    struct EnumContext
-    {
-        DWORD pid;
-        std::set<DWORD> tids;
         bool logWindows;
     };
 
