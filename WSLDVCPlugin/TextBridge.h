@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 #pragma once
 #include "pch.h"
+#include <tsvirtualchannels.h>
 
 // WSLg 文本输入桥：实现 MS-RDPETXT 规格所述"扩展 DLL"的角色——
 // 在 RDP 客户端（msrdc）进程内，把 Windows 系统文本输入服务
