@@ -15,6 +15,10 @@
 
 using namespace winrt::Windows::System::RemoteDesktop::Input;
 
+// 桥的独立文件日志（msrdc 的 DebugPrint 不落地，现场诊断需要）。
+void
+BridgeLog(const wchar_t* format, ...);
+
 // RAIL 窗口线程的 TSF 激活：msrdc 在虚拟化未启用时不为 RAIL 窗口
 // 激活 TSF（无上下文 → InputService 无从服务）。此处用公开 msctf API
 // 补上标准激活序列（ActivateEx → CreateContext → Push → SetFocus），
@@ -63,20 +67,36 @@ namespace
         BridgeLog(L"TextBridge: TSF activated, clientId=%u\n", clientId);
 
         ITfDocumentMgr* doc = nullptr;
-        hr = tm->CreateContext(clientId, 0, nullptr, &doc, nullptr);
+        ITfContext* ctx = nullptr;
+        hr = tm->CreateDocumentMgr(&doc);
         if (FAILED(hr) || !doc)
         {
-            BridgeLog(L"TextBridge: CreateContext failed hr=%x\n", hr);
+            BridgeLog(L"TextBridge: CreateDocumentMgr failed hr=%x\n", hr);
             tm->Release();
             return;
         }
-
-        hr = tm->SetFocus(doc);
-        BridgeLog(L"TextBridge: SetFocus(doc) hr=%x\n", hr);
+        TfEditCookie ec = 0;
+        hr = doc->CreateContext(clientId, 0, nullptr, &ctx, &ec);
+        if (FAILED(hr) || !ctx)
+        {
+            BridgeLog(L"TextBridge: CreateContext failed hr=%x\n", hr);
+            doc->Release();
+            tm->Release();
+            return;
+        }
+        // 压入基础上下文并把焦点设到该文档（线程的 TSF 输入焦点）。
+        hr = doc->Push(ctx);
+        if (SUCCEEDED(hr))
+        {
+            hr = tm->SetFocus(doc);
+        }
+        BridgeLog(L"TextBridge: Push hr=%x SetFocus(doc) hr=%x\n",
+                  hr == S_OK ? 0 : hr, hr);
 
         // 全局引用保持 TSF 对象存活（线程生命周期内不释放）。
         static ITfThreadMgr* s_persistMgr = tm;
         static ITfDocumentMgr* s_persistDoc = doc;
+        static ITfContext* s_persistCtx = ctx;
         if (hrInit == S_OK)
         {
             CoUninitialize();
