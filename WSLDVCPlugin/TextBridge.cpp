@@ -9,10 +9,97 @@
 #include <unknwn.h>
 #include <set>
 #include <thread>
+#include <msctf.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.System.RemoteDesktop.Input.h>
 
 using namespace winrt::Windows::System::RemoteDesktop::Input;
+
+// RAIL 窗口线程的 TSF 激活：msrdc 在虚拟化未启用时不为 RAIL 窗口
+// 激活 TSF（无上下文 → InputService 无从服务）。此处用公开 msctf API
+// 补上标准激活序列（ActivateEx → CreateContext → Push → SetFocus），
+// 让窗口线程拥有 TSF 输入上下文；InputService（TSF3 集中宿主）随之
+// 获得可关联到 RemoteTextConnection 的上下文。
+namespace
+{
+    HWND g_railHwnd = nullptr;
+    HHOOK g_tsfHook = nullptr;
+    bool g_tsfActivated = false;
+
+    void
+    ActivateTsfOnCurrentThread(HWND hwnd)
+    {
+        BridgeLog(L"TextBridge: TSF activate on thread %u, hwnd=%p\n",
+                  GetCurrentThreadId(), (void*)hwnd);
+        HRESULT hrInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+        ITfThreadMgr* tm = nullptr;
+        HRESULT hr = CoCreateInstance(CLSID_TF_ThreadMgr, nullptr, CLSCTX_INPROC_SERVER,
+                                      IID_ITfThreadMgr, reinterpret_cast<void**>(&tm));
+        if (FAILED(hr) || !tm)
+        {
+            BridgeLog(L"TextBridge: TF_ThreadMgr create failed hr=%x\n", hr);
+            return;
+        }
+
+        TfClientId clientId = 0;
+        ITfThreadMgrEx* tmEx = nullptr;
+        hr = tm->QueryInterface(IID_ITfThreadMgrEx, reinterpret_cast<void**>(&tmEx));
+        if (SUCCEEDED(hr) && tmEx)
+        {
+            hr = tmEx->ActivateEx(&clientId, TF_TMF_CONSOLE);
+            tmEx->Release();
+        }
+        else
+        {
+            hr = tm->Activate(&clientId);
+        }
+        if (FAILED(hr))
+        {
+            BridgeLog(L"TextBridge: TM activate failed hr=%x\n", hr);
+            tm->Release();
+            return;
+        }
+        BridgeLog(L"TextBridge: TSF activated, clientId=%u\n", clientId);
+
+        ITfDocumentMgr* doc = nullptr;
+        hr = tm->CreateContext(clientId, 0, nullptr, &doc, nullptr);
+        if (FAILED(hr) || !doc)
+        {
+            BridgeLog(L"TextBridge: CreateContext failed hr=%x\n", hr);
+            tm->Release();
+            return;
+        }
+
+        hr = tm->SetFocus(doc);
+        BridgeLog(L"TextBridge: SetFocus(doc) hr=%x\n", hr);
+
+        // 全局引用保持 TSF 对象存活（线程生命周期内不释放）。
+        static ITfThreadMgr* s_persistMgr = tm;
+        static ITfDocumentMgr* s_persistDoc = doc;
+        if (hrInit == S_OK)
+        {
+            CoUninitialize();
+        }
+    }
+
+    LRESULT
+    CALLBACK
+    TsfHookProc(int code, WPARAM wParam, LPARAM lParam)
+    {
+        if (code >= 0 && !g_tsfActivated && g_railHwnd)
+        {
+            g_tsfActivated = true;
+            ActivateTsfOnCurrentThread(g_railHwnd);
+            if (g_tsfHook)
+            {
+                UnhookWindowsHookEx(g_tsfHook);
+                g_tsfHook = nullptr;
+            }
+        }
+        return CallNextHookEx(nullptr, code, wParam, lParam);
+    }
+}
 
 // 桥的独立文件日志（msrdc 的 DebugPrint 不落地，现场诊断需要）。
 void
@@ -88,6 +175,21 @@ namespace
         if (IsWindowVisible(hwnd))
         {
             ctx->tids.insert(tid);
+            // 发现 RAIL 远程应用窗口：在该线程挂一次性消息钩子，
+            // 借钩子执行 TSF 激活序列（TSF 绑定窗口线程）。
+            wchar_t cls[64] = L"";
+            GetClassNameW(hwnd, cls, 64);
+            if (wcscmp(cls, L"RAIL_WINDOW") == 0 && !g_tsfActivated && !g_tsfHook)
+            {
+                g_railHwnd = hwnd;
+                HMODULE hMod = nullptr;
+                GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   reinterpret_cast<LPCWSTR>(&TsfHookProc), &hMod);
+                g_tsfHook = SetWindowsHookExW(WH_GETMESSAGE, TsfHookProc, hMod, tid);
+                BridgeLog(L"TextBridge: RAIL_WINDOW hwnd=%p tid=%u, tsf hook=%p\n",
+                          (void*)hwnd, tid, (void*)g_tsfHook);
+            }
         }
         return TRUE;
     }
