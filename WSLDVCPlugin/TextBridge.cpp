@@ -5,6 +5,8 @@
 #include "utils.h"
 
 #include <unknwn.h>
+#include <set>
+#include <thread>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.System.RemoteDesktop.Input.h>
 
@@ -23,6 +25,69 @@ namespace
     RemoteTextConnection g_connection{ nullptr };
     winrt::com_ptr<IWTSVirtualChannel> g_spC2SChannel;
     winrt::com_ptr<IWTSVirtualChannel> g_spS2CChannel;
+
+    // RegisterThread 看门狗：InputService 只对"已注册线程上的前台窗口"
+    // 做 IME 路由（API 语义："registers a thread on which the client
+    // will present remote UI"）。RAIL 窗口由 msrdc 的窗口线程动态创建，
+    // 因此周期性枚举本进程的可见顶层窗口，把新出现的窗口线程注册进
+    // 连接，保证前台 RAIL 窗口始终属于已注册线程。
+    std::thread g_windowWatchdog;
+    bool g_watchdogStop = false;
+    std::set<DWORD> g_registeredThreads;
+
+    struct EnumContext
+    {
+        DWORD pid;
+        std::set<DWORD> tids;
+    };
+
+    BOOL
+    CALLBACK
+    CollectRemoteUiThread(HWND hwnd, LPARAM lParam)
+    {
+        auto* ctx = reinterpret_cast<EnumContext*>(lParam);
+        DWORD pid = 0;
+        DWORD tid = GetWindowThreadProcessId(hwnd, &pid);
+        if (pid == ctx->pid && IsWindowVisible(hwnd))
+        {
+            ctx->tids.insert(tid);
+        }
+        return TRUE;
+    }
+
+    void
+    WatchdogLoop()
+    {
+        const DWORD pid = GetCurrentProcessId();
+        while (!g_watchdogStop)
+        {
+            if (g_connection)
+            {
+                EnumContext ctx{ pid, {} };
+                EnumWindows(CollectRemoteUiThread, reinterpret_cast<LPARAM>(&ctx));
+                for (DWORD tid : ctx.tids)
+                {
+                    if (g_registeredThreads.insert(tid).second)
+                    {
+                        try
+                        {
+                            g_connection.RegisterThread(tid);
+                            DebugPrint(L"TextBridge: RegisterThread(%u)\n", tid);
+                        }
+                        catch (winrt::hresult_error const& e)
+                        {
+                            DebugPrint(L"TextBridge: RegisterThread(%u) failed hr=%x\n",
+                                       tid, e.code());
+                        }
+                    }
+                }
+            }
+            for (int i = 0; i < 30 && !g_watchdogStop; ++i)
+            {
+                Sleep(100);  // 3 秒轮询，休眠粒度保证快速退出
+            }
+        }
+    }
 
     // RemoteTextConnectionDataHandler：系统文本输入服务产生的每条
     // client→server PDU 在此回调，原样写往 weston 的 C2S 通道。
@@ -194,6 +259,10 @@ TextBridge::Start(_In_ IWTSVirtualChannelManager* pChannelMgr)
                    e.code(), e.message().c_str());
         return e.code();
     }
+
+    // 启动窗口线程注册看门狗（见上方说明）。
+    g_watchdogStop = false;
+    g_windowWatchdog = std::thread(WatchdogLoop);
 
     return S_OK;
 }
