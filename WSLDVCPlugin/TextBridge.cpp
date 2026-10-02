@@ -21,8 +21,8 @@ namespace
     // 桥的全局状态：一条 RemoteTextConnection 连接 + 两条通道。
     // 生命周期与插件（msrdc 进程）相同，无需显式清理。
     RemoteTextConnection g_connection{ nullptr };
-    ComPtr<IWTSVirtualChannel> g_spC2SChannel;
-    ComPtr<IWTSVirtualChannel> g_spS2CChannel;
+    winrt::com_ptr<IWTSVirtualChannel> g_spC2SChannel;
+    winrt::com_ptr<IWTSVirtualChannel> g_spS2CChannel;
 
     // RemoteTextConnectionDataHandler：系统文本输入服务产生的每条
     // client→server PDU 在此回调，原样写往 weston 的 C2S 通道。
@@ -49,24 +49,28 @@ namespace
     }
 
     // 通道数据回调：S2C 通道收到 weston 的 PDU 后喂给系统文本输入服务。
-    class TextBridgeChannelCallback :
-        public RuntimeClass<ClassicCom, IWTSVirtualChannelCallback>
+    struct TextBridgeChannelCallback :
+        winrt::implements<TextBridgeChannelCallback, IWTSVirtualChannelCallback>
     {
-    public:
-        TextBridgeChannelCallback(BridgeChannelRole role, IWTSVirtualChannel* pChannel) :
+        explicit TextBridgeChannelCallback(BridgeChannelRole role) :
             m_role(role)
         {
-            if (role == BridgeChannelRole::ClientToServer)
+        }
+
+        void AttachChannel(IWTSVirtualChannel* pChannel)
+        {
+            if (m_role == BridgeChannelRole::ClientToServer)
             {
-                g_spC2SChannel = pChannel;
+                g_spC2SChannel.copy_from(pChannel);
             }
             else
             {
-                g_spS2CChannel = pChannel;
+                g_spS2CChannel.copy_from(pChannel);
             }
-            DebugPrint(L"TextBridge: channel connected (role=%d)\n", static_cast<int>(role));
+            DebugPrint(L"TextBridge: channel connected (role=%d)\n", static_cast<int>(m_role));
         }
 
+        // 只有 S2C 通道会收到 weston 的数据；C2S 通道的数据方向相反。
         STDMETHODIMP
         OnDataReceived(
             ULONG cbSize,
@@ -103,18 +107,14 @@ namespace
             return S_OK;
         }
 
-    protected:
-        virtual ~TextBridgeChannelCallback() = default;
-
     private:
         BridgeChannelRole m_role;
     };
 
     // Listener：接受 weston（服务端）发起的通道创建请求。
-    class TextBridgeListenerCallback :
-        public RuntimeClass<ClassicCom, IWTSListenerCallback>
+    struct TextBridgeListenerCallback :
+        winrt::implements<TextBridgeListenerCallback, IWTSListenerCallback>
     {
-    public:
         explicit TextBridgeListenerCallback(BridgeChannelRole role) :
             m_role(role)
         {
@@ -129,19 +129,18 @@ namespace
         {
             UNREFERENCED_PARAMETER(data);
 
-            auto callback = Make<TextBridgeChannelCallback>(m_role, pChannel);
+            auto callback = winrt::make<TextBridgeChannelCallback>(m_role);
             if (!callback)
             {
                 *pbAccept = FALSE;
                 return E_OUTOFMEMORY;
             }
-            *ppCallback = callback.Detach();
+            // 通道引用计数交给 msrdc；桥侧另存一份引用以便转发。
+            callback->AttachChannel(pChannel);
+            *ppCallback = callback.detach();
             *pbAccept = TRUE;
             return S_OK;
         }
-
-    protected:
-        virtual ~TextBridgeListenerCallback() = default;
 
     private:
         BridgeChannelRole m_role;
@@ -162,17 +161,10 @@ TextBridge::Start(_In_ IWTSVirtualChannelManager* pChannelMgr)
         // 线程已被初始化为其他 apartment 模型，直接沿用。
     }
 
-    ComPtr<IWTSListenerCallback> spListenerCallback;
-    ComPtr<IWTSListener> spListener;
-    HRESULT hr;
-
-    hr = Make<TextBridgeListenerCallback>(BridgeChannelRole::ClientToServer).As(&spListenerCallback);
-    if (FAILED(hr))
-    {
-        return hr;
-    }
-    hr = pChannelMgr->CreateListener("WSL::TextBridge::ClientToServer", 0,
-                                     spListenerCallback.Get(), &spListener);
+    auto spC2SListener = winrt::make<TextBridgeListenerCallback>(BridgeChannelRole::ClientToServer);
+    winrt::com_ptr<IWTSListener> spListener;
+    HRESULT hr = pChannelMgr->CreateListener("WSL::TextBridge::ClientToServer", 0,
+                                             spC2SListener.get(), spListener.put());
     if (FAILED(hr))
     {
         DebugPrint(L"TextBridge: CreateListener(ClientToServer) failed hr=%x\n", hr);
@@ -180,13 +172,9 @@ TextBridge::Start(_In_ IWTSVirtualChannelManager* pChannelMgr)
     }
     spListener = nullptr;
 
-    hr = Make<TextBridgeListenerCallback>(BridgeChannelRole::ServerToClient).As(&spListenerCallback);
-    if (FAILED(hr))
-    {
-        return hr;
-    }
+    auto spS2CListener = winrt::make<TextBridgeListenerCallback>(BridgeChannelRole::ServerToClient);
     hr = pChannelMgr->CreateListener("WSL::TextBridge::ServerToClient", 0,
-                                     spListenerCallback.Get(), &spListener);
+                                     spS2CListener.get(), spListener.put());
     if (FAILED(hr))
     {
         DebugPrint(L"TextBridge: CreateListener(ServerToClient) failed hr=%x\n", hr);

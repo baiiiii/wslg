@@ -4,6 +4,7 @@
 #include "WSLDVCPlugin.h"
 #include "WSLDVCListenerCallback.h"
 #include "TextBridge.h"
+#include "utils.h"
 
 //
 // Using Windows Runtime C++ Template Library(WRL) to implement COM objects.
