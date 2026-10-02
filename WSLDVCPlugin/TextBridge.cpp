@@ -29,6 +29,8 @@ namespace
     HWND g_railHwnd = nullptr;
     HHOOK g_tsfHook = nullptr;
     bool g_tsfActivated = false;
+    ITfThreadMgr* g_threadMgr = nullptr;
+    ITfDocumentMgr* g_docMgr = nullptr;
 
     void
     ActivateTsfOnCurrentThread(HWND hwnd)
@@ -47,17 +49,8 @@ namespace
         }
 
         TfClientId clientId = 0;
-        ITfThreadMgrEx* tmEx = nullptr;
-        hr = tm->QueryInterface(IID_ITfThreadMgrEx, reinterpret_cast<void**>(&tmEx));
-        if (SUCCEEDED(hr) && tmEx)
-        {
-            hr = tmEx->ActivateEx(&clientId, TF_TMF_CONSOLE);
-            tmEx->Release();
-        }
-        else
-        {
-            hr = tm->Activate(&clientId);
-        }
+        // 普通 GUI 模式激活（TF_TMF_CONSOLE 会让 TSF 走控制台路径）。
+        hr = tm->Activate(&clientId);
         if (FAILED(hr))
         {
             BridgeLog(L"TextBridge: TM activate failed hr=%x\n", hr);
@@ -93,9 +86,9 @@ namespace
         BridgeLog(L"TextBridge: Push hr=%x SetFocus(doc) hr=%x\n",
                   hr == S_OK ? 0 : hr, hr);
 
-        // 全局引用保持 TSF 对象存活（线程生命周期内不释放）。
-        static ITfThreadMgr* s_persistMgr = tm;
-        static ITfDocumentMgr* s_persistDoc = doc;
+        // 全局引用保持 TSF 对象存活；WM_SETFOCUS 时重绑文档焦点。
+        g_threadMgr = tm;
+        g_docMgr = doc;
         static ITfContext* s_persistCtx = ctx;
         if (hrInit == S_OK)
         {
@@ -107,14 +100,23 @@ namespace
     CALLBACK
     TsfHookProc(int code, WPARAM wParam, LPARAM lParam)
     {
-        if (code >= 0 && !g_tsfActivated && g_railHwnd)
+        if (code >= HC_ACTION && g_railHwnd)
         {
-            g_tsfActivated = true;
-            ActivateTsfOnCurrentThread(g_railHwnd);
-            if (g_tsfHook)
+            MSG* msg = reinterpret_cast<MSG*>(lParam);
+            if (msg && msg->hwnd == g_railHwnd)
             {
-                UnhookWindowsHookEx(g_tsfHook);
-                g_tsfHook = nullptr;
+                if (!g_tsfActivated)
+                {
+                    g_tsfActivated = true;
+                    ActivateTsfOnCurrentThread(g_railHwnd);
+                }
+                // RAIL 窗口获得键盘焦点时，把 TSF 文档焦点重新绑定
+                // （msrdc 未启用虚拟化，不会自己调 SetFocus）。
+                if (g_threadMgr && g_docMgr && msg->message == WM_SETFOCUS)
+                {
+                    HRESULT hr = g_threadMgr->SetFocus(g_docMgr);
+                    BridgeLog(L"TextBridge: refocus on WM_SETFOCUS hr=%x\n", hr);
+                }
             }
         }
         return CallNextHookEx(nullptr, code, wParam, lParam);
