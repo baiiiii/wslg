@@ -52,12 +52,8 @@ namespace
     struct TextBridgeChannelCallback :
         winrt::implements<TextBridgeChannelCallback, IWTSVirtualChannelCallback>
     {
-        explicit TextBridgeChannelCallback(BridgeChannelRole role) :
+        explicit TextBridgeChannelCallback(BridgeChannelRole role, IWTSVirtualChannel* pChannel) :
             m_role(role)
-        {
-        }
-
-        void AttachChannel(IWTSVirtualChannel* pChannel)
         {
             if (m_role == BridgeChannelRole::ClientToServer)
             {
@@ -129,14 +125,12 @@ namespace
         {
             UNREFERENCED_PARAMETER(data);
 
-            auto callback = winrt::make<TextBridgeChannelCallback>(m_role);
+            auto callback = winrt::make<TextBridgeChannelCallback>(m_role, pChannel);
             if (!callback)
             {
                 *pbAccept = FALSE;
                 return E_OUTOFMEMORY;
             }
-            // 通道引用计数交给 msrdc；桥侧另存一份引用以便转发。
-            callback->AttachChannel(pChannel);
             *ppCallback = callback.detach();
             *pbAccept = TRUE;
             return S_OK;
