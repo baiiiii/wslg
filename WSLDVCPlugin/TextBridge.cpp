@@ -4,6 +4,8 @@
 #include "TextBridge.h"
 #include "utils.h"
 
+#include <cstdio>
+#include <cwchar>
 #include <unknwn.h>
 #include <set>
 #include <thread>
@@ -11,6 +13,27 @@
 #include <winrt/Windows.System.RemoteDesktop.Input.h>
 
 using namespace winrt::Windows::System::RemoteDesktop::Input;
+
+// 桥的独立文件日志（msrdc 的 DebugPrint 不落地，现场诊断需要）。
+void
+BridgeLog(const wchar_t* format, ...)
+{
+    wchar_t buf[512];
+    va_list args;
+    va_start(args, format);
+    _vsnwprintf_s(buf, _TRUNCATE, format, args);
+    va_end(args);
+
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, L"C:\\ProgramData\\wsltextbridge.log", L"a") == 0 && f)
+    {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        fwprintf(f, L"[%02d:%02d:%02d.%03d] %s\n",
+                 st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
+        fclose(f);
+    }
+}
 
 namespace
 {
@@ -72,11 +95,11 @@ namespace
                         try
                         {
                             g_connection.RegisterThread(tid);
-                            DebugPrint(L"TextBridge: RegisterThread(%u)\n", tid);
+                            BridgeLog(L"TextBridge: RegisterThread(%u)\n", tid);
                         }
                         catch (winrt::hresult_error const& e)
                         {
-                            DebugPrint(L"TextBridge: RegisterThread(%u) failed hr=%x\n",
+                            BridgeLog(L"TextBridge: RegisterThread(%u) failed hr=%x\n",
                                        tid, e.code());
                         }
                     }
@@ -95,10 +118,10 @@ namespace
     bool
     ForwardClientToServer(winrt::array_view<uint8_t const> const& pdu)
     {
-        DebugPrint(L"TextBridge: pduForwarder %u bytes\n", static_cast<ULONG>(pdu.size()));
+        BridgeLog(L"TextBridge: pduForwarder %u bytes\n", static_cast<ULONG>(pdu.size()));
         if (!g_spC2SChannel)
         {
-            DebugPrint(L"TextBridge: C2S channel not ready, dropping\n");
+            BridgeLog(L"TextBridge: C2S channel not ready, dropping\n");
             return true;
         }
 
@@ -108,7 +131,7 @@ namespace
             nullptr);
         if (FAILED(hr))
         {
-            DebugPrint(L"TextBridge: C2S channel write failed hr=%x\n", hr);
+            BridgeLog(L"TextBridge: C2S channel write failed hr=%x\n", hr);
         }
         return true;
     }
@@ -128,7 +151,7 @@ namespace
             {
                 g_spS2CChannel.copy_from(pChannel);
             }
-            DebugPrint(L"TextBridge: channel connected (role=%d)\n", static_cast<int>(m_role));
+            BridgeLog(L"TextBridge: channel connected (role=%d)\n", static_cast<int>(m_role));
         }
 
         // 只有 S2C 通道会收到 weston 的数据；C2S 通道的数据方向相反。
@@ -146,7 +169,7 @@ namespace
                 }
                 catch (winrt::hresult_error const& e)
                 {
-                    DebugPrint(L"TextBridge: ReportDataReceived failed hr=%x %s\n",
+                    BridgeLog(L"TextBridge: ReportDataReceived failed hr=%x %s\n",
                                e.code(), e.message().c_str());
                 }
             }
@@ -164,7 +187,7 @@ namespace
             {
                 g_spS2CChannel = nullptr;
             }
-            DebugPrint(L"TextBridge: channel closed (role=%d)\n", static_cast<int>(m_role));
+            BridgeLog(L"TextBridge: channel closed (role=%d)\n", static_cast<int>(m_role));
             return S_OK;
         }
 
@@ -226,7 +249,7 @@ TextBridge::Start(_In_ IWTSVirtualChannelManager* pChannelMgr)
                                              spC2SListener.get(), spListener.put());
     if (FAILED(hr))
     {
-        DebugPrint(L"TextBridge: CreateListener(ClientToServer) failed hr=%x\n", hr);
+        BridgeLog(L"TextBridge: CreateListener(ClientToServer) failed hr=%x\n", hr);
         return hr;
     }
     spListener = nullptr;
@@ -236,7 +259,7 @@ TextBridge::Start(_In_ IWTSVirtualChannelManager* pChannelMgr)
                                      spS2CListener.get(), spListener.put());
     if (FAILED(hr))
     {
-        DebugPrint(L"TextBridge: CreateListener(ServerToClient) failed hr=%x\n", hr);
+        BridgeLog(L"TextBridge: CreateListener(ServerToClient) failed hr=%x\n", hr);
         return hr;
     }
     spListener = nullptr;
@@ -250,12 +273,12 @@ TextBridge::Start(_In_ IWTSVirtualChannelManager* pChannelMgr)
             winrt::Windows::Foundation::GuidHelper::CreateNewGuid(),
             handler);
         g_connection.IsEnabled(true);
-        DebugPrint(L"TextBridge: RemoteTextConnection created, IsEnabled=%d\n",
+        BridgeLog(L"TextBridge: RemoteTextConnection created, IsEnabled=%d\n",
                    g_connection.IsEnabled() ? 1 : 0);
     }
     catch (winrt::hresult_error const& e)
     {
-        DebugPrint(L"TextBridge: create connection failed hr=%x %s\n",
+        BridgeLog(L"TextBridge: create connection failed hr=%x %s\n",
                    e.code(), e.message().c_str());
         return e.code();
     }
