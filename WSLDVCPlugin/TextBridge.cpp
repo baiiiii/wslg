@@ -78,15 +78,52 @@ namespace
         return TRUE;
     }
 
+    struct EnumContext
+    {
+        DWORD pid;
+        std::set<DWORD> tids;
+        bool logWindows;
+    };
+
+    BOOL
+    CALLBACK
+    CollectRemoteUiThread(HWND hwnd, LPARAM lParam)
+    {
+        auto* ctx = reinterpret_cast<EnumContext*>(lParam);
+        DWORD pid = 0;
+        DWORD tid = GetWindowThreadProcessId(hwnd, &pid);
+        if (pid != ctx->pid)
+        {
+            return TRUE;
+        }
+        if (ctx->logWindows)
+        {
+            wchar_t cls[64] = L"";
+            wchar_t title[96] = L"";
+            GetClassNameW(hwnd, cls, 64);
+            GetWindowTextW(hwnd, title, 96);
+            BridgeLog(L"  window hwnd=%p tid=%u visible=%d class=%s title=%.60s",
+                      (void*)hwnd, tid, IsWindowVisible(hwnd) ? 1 : 0, cls, title);
+        }
+        if (IsWindowVisible(hwnd))
+        {
+            ctx->tids.insert(tid);
+        }
+        return TRUE;
+    }
+
     void
     WatchdogLoop()
     {
         const DWORD pid = GetCurrentProcessId();
+        int iteration = 0;
         while (!g_watchdogStop)
         {
             if (g_connection)
             {
-                EnumContext ctx{ pid, {} };
+                // 前几轮打印窗口明细，确认 RegisterThread 覆盖了前台
+                // RAIL 窗口所在线程。
+                EnumContext ctx{ pid, {}, iteration < 3 };
                 EnumWindows(CollectRemoteUiThread, reinterpret_cast<LPARAM>(&ctx));
                 for (DWORD tid : ctx.tids)
                 {
@@ -100,10 +137,11 @@ namespace
                         catch (winrt::hresult_error const& e)
                         {
                             BridgeLog(L"TextBridge: RegisterThread(%u) failed hr=%x\n",
-                                       tid, e.code());
+                                      tid, e.code());
                         }
                     }
                 }
+                ++iteration;
             }
             for (int i = 0; i < 30 && !g_watchdogStop; ++i)
             {
