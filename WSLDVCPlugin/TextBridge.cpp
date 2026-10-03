@@ -23,7 +23,6 @@
 #include <set>
 #include <thread>
 #include <unknwn.h>
-#include <msctf.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.System.RemoteDesktop.Input.h>
 
@@ -54,16 +53,8 @@ namespace
     RemoteTextConnection g_connection{ nullptr };
     winrt::com_ptr<IWTSVirtualChannel> g_spC2SChannel;
     winrt::com_ptr<IWTSVirtualChannel> g_spS2CChannel;
-    ITfContext* g_context = nullptr;
     winrt::com_ptr<ITfComposition> g_activeComposition;
-    winrt::com_ptr<ITfCompositionView> g_activeCompositionView;
-    std::wstring g_lastCompositionText;   // OnEndEdit 缓存的组合串（提交用）
     TfClientId g_clientId = 0;
-    ITfThreadMgr* g_threadMgr = nullptr;
-    ITfDocumentMgr* g_docMgr = nullptr;
-    HWND g_railHwnd = nullptr;
-    HHOOK g_tsfHook = nullptr;
-    bool g_tsfActivated = false;
     bool g_watchdogStop = false;
     std::thread g_windowWatchdog;
     std::set<DWORD> g_registeredThreads;
@@ -317,118 +308,6 @@ namespace
     }
 
     // ------------------------------------------------------------------
-    // RAIL 窗口线程的 TSF 激活（公开 msctf API）
-    // ------------------------------------------------------------------
-    void
-    ActivateTsfOnCurrentThread(HWND hwnd)
-    {
-        BridgeLog(L"TextBridge: TSF activate on thread %u, hwnd=%p\n",
-                  GetCurrentThreadId(), (void*)hwnd);
-        HRESULT hrInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-
-        ITfThreadMgr* tm = nullptr;
-        HRESULT hr = CoCreateInstance(CLSID_TF_ThreadMgr, nullptr, CLSCTX_INPROC_SERVER,
-                                      IID_ITfThreadMgr, reinterpret_cast<void**>(&tm));
-        if (FAILED(hr) || !tm)
-        {
-            BridgeLog(L"TextBridge: TF_ThreadMgr create failed hr=%x\n", hr);
-            return;
-        }
-
-        // 普通 GUI 模式激活（TF_TMF_CONSOLE 会走控制台路径）。
-        TfClientId clientId = 0;
-        hr = tm->Activate(&clientId);
-        if (FAILED(hr))
-        {
-            BridgeLog(L"TextBridge: TM activate failed hr=%x\n", hr);
-            tm->Release();
-            return;
-        }
-        BridgeLog(L"TextBridge: TSF activated, clientId=%u\n", clientId);
-        g_clientId = clientId;
-
-        ITfDocumentMgr* doc = nullptr;
-        ITfContext* ctx = nullptr;
-        hr = tm->CreateDocumentMgr(&doc);
-        if (FAILED(hr) || !doc)
-        {
-            BridgeLog(L"TextBridge: CreateDocumentMgr failed hr=%x\n", hr);
-            tm->Release();
-            return;
-        }
-        TfEditCookie ec = 0;
-        hr = doc->CreateContext(clientId, 0, nullptr, &ctx, &ec);
-        if (FAILED(hr) || !ctx)
-        {
-            BridgeLog(L"TextBridge: CreateContext failed hr=%x\n", hr);
-            doc->Release();
-            tm->Release();
-            return;
-        }
-        g_context = ctx;
-
-        // 监听文本变化与组合生命周期。
-        ITfSource* ctxSource = nullptr;
-        hr = ctx->QueryInterface(IID_ITfSource, reinterpret_cast<void**>(&ctxSource));
-        if (SUCCEEDED(hr) && ctxSource)
-        {
-            auto sink = winrt::make<BridgeTsfSink>();
-            auto teSink = sink.as<ITfTextEditSink>();
-            DWORD teCookie = 0;
-            HRESULT hrAdv = ctxSource->AdviseSink(IID_ITfTextEditSink,
-                                                  teSink.get(), &teCookie);
-            BridgeLog(L"TextBridge: advise TextEditSink hr=%x\n", hrAdv);
-            auto ocSink = sink.as<ITfContextOwnerCompositionSink>();
-            DWORD ocCookie = 0;
-            hrAdv = ctxSource->AdviseSink(IID_ITfContextOwnerCompositionSink,
-                                          ocSink.get(), &ocCookie);
-            BridgeLog(L"TextBridge: advise ContextOwnerCompositionSink hr=%x\n", hrAdv);
-            ctxSource->Release();
-        }
-
-        hr = doc->Push(ctx);
-        if (SUCCEEDED(hr))
-        {
-            hr = tm->SetFocus(doc);
-        }
-        BridgeLog(L"TextBridge: Push/SetFocus(doc) hr=%x\n", hr);
-
-        // 保持 TSF 对象存活；WM_SETFOCUS 时重绑文档焦点。
-        g_threadMgr = tm;
-        g_docMgr = doc;
-        if (hrInit == S_OK)
-        {
-            CoUninitialize();
-        }
-    }
-
-    LRESULT
-    CALLBACK
-    TsfHookProc(int code, WPARAM wParam, LPARAM lParam)
-    {
-        if (code >= HC_ACTION && g_railHwnd)
-        {
-            MSG* msg = reinterpret_cast<MSG*>(lParam);
-            if (msg && msg->hwnd == g_railHwnd)
-            {
-                if (!g_tsfActivated)
-                {
-                    g_tsfActivated = true;
-                    ActivateTsfOnCurrentThread(g_railHwnd);
-                }
-                // RAIL 窗口获得键盘焦点时重绑 TSF 文档焦点（msrdc 未
-                // 启用虚拟化，不会自己调 SetFocus）。
-                if (g_threadMgr && g_docMgr && msg->message == WM_SETFOCUS)
-                {
-                    HRESULT hr = g_threadMgr->SetFocus(g_docMgr);
-                    BridgeLog(L"TextBridge: refocus on WM_SETFOCUS hr=%x\n", hr);
-                }
-            }
-        }
-        return CallNextHookEx(nullptr, code, wParam, lParam);
-    }
-
-    // ------------------------------------------------------------------
     // 窗口线程注册看门狗：InputService 只对已注册线程上的前台窗口做
     // IME 路由。RAIL 窗口动态创建，周期枚举并注册新线程。
     // ------------------------------------------------------------------
@@ -460,24 +339,6 @@ namespace
         if (IsWindowVisible(hwnd))
         {
             ctx->tids.insert(tid);
-            // RAIL 窗口：挂一次性线程钩子执行 TSF 激活。
-            if (!g_tsfActivated && !g_tsfHook)
-            {
-                wchar_t cls[64] = L"";
-                GetClassNameW(hwnd, cls, 64);
-                if (wcscmp(cls, L"RAIL_WINDOW") == 0)
-                {
-                    g_railHwnd = hwnd;
-                    HMODULE hMod = nullptr;
-                    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                       reinterpret_cast<LPCWSTR>(&TsfHookProc), &hMod);
-                    g_tsfHook = SetWindowsHookExW(WH_GETMESSAGE, TsfHookProc, hMod, tid);
-                    BridgeLog(L"TextBridge: RAIL_WINDOW hwnd=%p tid=%u, tsf hook=%p\n",
-                              (void*)hwnd, tid, (void*)g_tsfHook);
-                }
-            }
-        }
         return TRUE;
     }
 
