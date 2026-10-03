@@ -209,6 +209,7 @@ namespace
         OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, ITfEditRecord* pEditRecord)
         {
             UNREFERENCED_PARAMETER(pic);
+            UNREFERENCED_PARAMETER(pEditRecord);
             if (g_activeCompositionView)
             {
                 ITfRange* range = nullptr;
