@@ -56,6 +56,8 @@ namespace
     winrt::com_ptr<IWTSVirtualChannel> g_spS2CChannel;
     ITfContext* g_context = nullptr;
     winrt::com_ptr<ITfComposition> g_activeComposition;
+    winrt::com_ptr<ITfCompositionView> g_activeCompositionView;
+    TfClientId g_clientId = 0;
     ITfThreadMgr* g_threadMgr = nullptr;
     ITfDocumentMgr* g_docMgr = nullptr;
     HWND g_railHwnd = nullptr;
@@ -350,6 +352,7 @@ namespace
             return;
         }
         BridgeLog(L"TextBridge: TSF activated, clientId=%u\n", clientId);
+        g_clientId = clientId;
 
         ITfDocumentMgr* doc = nullptr;
         ITfContext* ctx = nullptr;
