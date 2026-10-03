@@ -805,6 +805,28 @@ namespace
             ctxSource->Release();
         }
 
+        // 激活微软拼音配置档：TSF Activate 默认档很可能是英文键盘，
+        // 不显式激活中文 IME 则 IME 的按键 sink 不消费任何键。
+        // CLSID/Profile 取自客户端 UPDATE_INPUT_PROFILE PDU（实测捕获）。
+        {
+            ITfInputProcessorProfiles* profiles = nullptr;
+            HRESULT hrProf = CoCreateInstance(CLSID_TF_InputProcessorProfiles,
+                                              nullptr, CLSCTX_INPROC_SERVER,
+                                              IID_ITfInputProcessorProfiles,
+                                              reinterpret_cast<void**>(&profiles));
+            if (SUCCEEDED(hrProf) && profiles)
+            {
+                CLSID clsid = {};
+                GUID profile = {};
+                CLSIDFromString(L"{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E356}", &clsid);
+                CLSIDFromString(L"{FA550B04-5AD7-411F-A5AC-CA038EC515D7}", &profile);
+                hrProf = profiles->ActivateLanguageProfile(0x0804, clsid, profile);
+                BridgeLog(L"TextBridge: ActivateLanguageProfile(MS Pinyin) hr=%x\n",
+                          hrProf);
+                profiles->Release();
+            }
+        }
+
         // 按键路由管理器：把 RAIL 窗口的按键消息喂给 TSF（IME 组合的
         // 前提——没有它按键直达应用，IME 收不到键、永远不组合）。
         hr = tm->QueryInterface(IID_ITfKeystrokeMgr,
