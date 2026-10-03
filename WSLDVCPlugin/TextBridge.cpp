@@ -811,6 +811,42 @@ namespace
                                 reinterpret_cast<void**>(&g_keystrokeMgr));
         BridgeLog(L"TextBridge: keystroke mgr hr=%x\n", hr);
 
+        // 打开键盘 compartment（IME 按键处理的前提——新激活的线程
+        // 默认关闭；关闭时 IME 不消费任何按键）。
+        ITfCompartmentMgr* cm = nullptr;
+        hr = tm->QueryInterface(IID_ITfCompartmentMgr,
+                                reinterpret_cast<void**>(&cm));
+        if (SUCCEEDED(hr) && cm)
+        {
+            ITfCompartment* pOpen = nullptr;
+            hr = cm->GetCompartment(GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
+                                    &pOpen);
+            if (SUCCEEDED(hr) && pOpen)
+            {
+                VARIANT v;
+                VariantInit(&v);
+                v.vt = VT_I4;
+                v.lVal = 1;   // keyboard open
+                hr = pOpen->SetValue(clientId, &v);
+                BridgeLog(L"TextBridge: keyboard open hr=%x\n", hr);
+                pOpen->Release();
+            }
+            // IME 转换模式：native（中文）
+            ITfCompartment* pConv = nullptr;
+            hr = cm->GetCompartment(GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION,
+                                    &pConv);
+            if (SUCCEEDED(hr) && pConv)
+            {
+                VARIANT v2;
+                VariantInit(&v2);
+                v2.vt = VT_I4;
+                v2.lVal = 1;   // native（中文）
+                pConv->SetValue(clientId, &v2);
+                pConv->Release();
+            }
+            cm->Release();
+        }
+
         // 保持 TSF 对象存活；WM_SETFOCUS 时重绑文档焦点。
         g_threadMgr = tm;
         g_docMgr = doc;
