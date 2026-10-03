@@ -55,6 +55,29 @@ namespace
     bool g_watchdogStop = false;
     std::thread g_windowWatchdog;
     std::set<DWORD> g_registeredThreads;
+
+    // RemoteTextConnectionDataHandler：InputService 产生的每条 C2S PDU
+    // 经此回调，原样写往 weston 的 C2S 通道。返回 true 表示已消费。
+    bool
+    ForwardClientToServer(winrt::array_view<uint8_t const> const& pdu)
+    {
+        BridgeLog(L"TextBridge: pduForwarder %u bytes\n", (UINT32)pdu.size());
+        if (!g_spC2SChannel)
+        {
+            BridgeLog(L"TextBridge: C2S channel not ready, dropping\n");
+            return true;
+        }
+        HRESULT hr = g_spC2SChannel->Write(
+            static_cast<ULONG>(pdu.size()),
+            const_cast<BYTE*>(pdu.data()),
+            nullptr);
+        if (FAILED(hr))
+        {
+            BridgeLog(L"TextBridge: C2S channel write failed hr=%x\n", hr);
+        }
+        return true;
+    }
+
     // ------------------------------------------------------------------
     // 窗口线程注册看门狗：InputService 只对已注册线程上的前台窗口做
     // IME 路由。RAIL 窗口动态创建，周期枚举并注册新线程。
