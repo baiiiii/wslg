@@ -58,6 +58,7 @@ namespace
     winrt::com_ptr<ITfComposition> g_activeComposition;
     winrt::com_ptr<ITfCompositionView> g_activeCompositionView;
     std::wstring g_lastCompositionText;   // OnEndEdit 缓存的组合串（提交用）
+    BOOL g_sinkAdvised = FALSE;           // TextEditSink 挂接成功标志
     std::wstring g_pendingCommitText;     // IME 插入文本存储的最终文本（提交用）
     TfClientId g_clientId = 0;
     ITfThreadMgr* g_threadMgr = nullptr;
@@ -558,10 +559,24 @@ namespace
                                ITfEditRecord* pEditRecord) override
         {
             BridgeLog(L"TextBridge: OnEndEdit fired");
-            (void)pEditRecord;
-            // 本会话 IME 写入存储的文本（选字时 IME 用最终中文覆写组合区间）
-            if (g_textStore && !g_textStore->inserted.empty())
-                g_pendingCommitText = g_textStore->inserted;
+            // vacant 上下文（无存储）：用 pEditRecord 取本会话变更文本
+            // ——组合期间即新组合串；选字确认时若 IME 成功写入最终中文，
+            // 变更文本即中文（否则为空，退回组合串缓存）。
+            std::wstring changedText;
+            {
+                ITfRange* chRange = nullptr;
+                HRESULT hrCh = pEditRecord->GetTextAndPropertyUpdates(
+                    0, nullptr, 0, &chRange);
+                if (SUCCEEDED(hrCh) && chRange)
+                {
+                    wchar_t buf[1024];
+                    ULONG got = 0;
+                    if (SUCCEEDED(chRange->GetText(ecReadOnly, 0, buf,
+                                                   1023, &got)))
+                        changedText.assign(buf, got);
+                    chRange->Release();
+                }
+            }
 
             ITfContextComposition* cc = nullptr;
             HRESULT hr = pic->QueryInterface(IID_ITfContextComposition,
@@ -601,27 +616,27 @@ namespace
 
             if (hasComposition)
             {
-                g_lastCompositionText = text;
-                SendComposition(text, 2);   // UPDATE preedit
-                BridgeLog(L"TextBridge: preedit len=%u\n", (UINT32)text.size());
+                // 组合活跃：优先变更文本，退回组合串
+                const std::wstring& preedit =
+                    !changedText.empty() ? changedText : text;
+                g_lastCompositionText = preedit;
+                SendComposition(preedit, 2);   // UPDATE preedit
+                BridgeLog(L"TextBridge: preedit len=%u",
+                          (UINT32)preedit.size());
                 g_pendingCommitText.clear();   // 组合仍活跃，提交文本未定
             }
-            else if (!g_pendingCommitText.empty() ||
-                     !g_lastCompositionText.empty())
+            else if (!changedText.empty() || !g_lastCompositionText.empty())
             {
-                // 组合结束（选字确认）：提交 IME 写入存储的最终文本；
-                // 存储无写入时退回最后组合串。提交后清空存储保证下次
-                // 组合从干净状态开始。
-                const std::wstring& commit = !g_pendingCommitText.empty()
-                    ? g_pendingCommitText : g_lastCompositionText;
+                // 组合结束（选字确认）：优先变更文本（选中的最终中文），
+                // 退回最后组合串。提交后清空。
+                const std::wstring& commit = !changedText.empty()
+                    ? changedText : g_lastCompositionText;
                 BridgeLog(L"TextBridge: commit len=%u\n",
                           (UINT32)commit.size());
                 SendUpdateText(commit);
                 SendComposition(L"", 3);   // LEAVE 清 preedit
                 g_lastCompositionText.clear();
                 g_pendingCommitText.clear();
-                if (g_textStore)
-                    g_textStore->Reset();
             }
             return S_OK;
         }
@@ -722,7 +737,7 @@ namespace
             return;
         }
         TfEditCookie ec = 0;
-        hr = doc->CreateContext(clientId, 0, g_textStore, &ctx, &ec);
+        hr = doc->CreateContext(clientId, 0, nullptr, &ctx, &ec);
         if (FAILED(hr) || !ctx)
         {
             BridgeLog(L"TextBridge: CreateContext failed hr=%x\n", hr);
@@ -743,6 +758,23 @@ namespace
             hr = tm->SetFocus(doc);
         }
         BridgeLog(L"TextBridge: Push/SetFocus(doc) hr=%x\n", hr);
+
+        // 挂接 TextEditSink（手写 QI）：OnEndEdit 驱动组合文本捕获。
+        // 实测单独挂接与候选窗是否出现的关系待验证——文本存储已确认
+        // 破坏 IME 参与，sink 单独从未测过。
+        ITfSource* ctxSource = nullptr;
+        hr = ctx->QueryInterface(IID_ITfSource, reinterpret_cast<void**>(&ctxSource));
+        if (SUCCEEDED(hr) && ctxSource)
+        {
+            ITfTextEditSink* teSink = new BridgeTsfSink();
+            DWORD teCookie = 0;
+            HRESULT hrAdv = ctxSource->AdviseSink(IID_ITfTextEditSink,
+                                                  teSink, &teCookie);
+            BridgeLog(L"TextBridge: advise TextEditSink hr=%x\n", hrAdv);
+            if (SUCCEEDED(hrAdv)) { g_sinkAdvised = TRUE; }
+            teSink->Release();
+            ctxSource->Release();
+        }
 
         // 保持 TSF 对象存活；WM_SETFOCUS 时重绑文档焦点。
         g_threadMgr = tm;
@@ -828,6 +860,10 @@ namespace
         if (now - lastPoll < 120)   // 节流 ~8 次/秒
             return;
         lastPoll = now;
+
+        // sink 已挂接时由 OnEndEdit 驱动，轮询停用（避免双发）
+        if (g_sinkAdvised)
+            return;
 
         if (!g_context || !g_clientId)
             return;
