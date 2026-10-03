@@ -77,6 +77,28 @@ namespace
             tm->Release();
             return;
         }
+        g_context = ctx;
+
+        // 监听 TSF 文本变化与组合生命周期：IME 的组合/确认文本写入本
+        // 上下文，桥读取后转为 MS-RDPETXT PDU（UPDATE_COMPOSITION=
+        // preedit、UPDATE_TEXT=提交）发往 weston。
+        ITfSource* ctxSource = nullptr;
+        hr = ctx->QueryInterface(IID_ITfSource, reinterpret_cast<void**>(&ctxSource));
+        if (SUCCEEDED(hr) && ctxSource)
+        {
+            auto sink = winrt::make<BridgeTsfSink>();
+            ITfTextEditSink* teSink = sink.as<ITfTextEditSink>();
+            DWORD teCookie = 0;
+            HRESULT hrAdv = ctxSource->AdviseSink(IID_ITfTextEditSink,
+                                                  reinterpret_cast<IUnknown*>(teSink), &teCookie);
+            BridgeLog(L"TextBridge: advise TextEditSink hr=%x\n", hrAdv);
+            ITfContextOwnerCompositionSink* ocSink = sink.as<ITfContextOwnerCompositionSink>();
+            DWORD ocCookie = 0;
+            hrAdv = ctxSource->AdviseSink(IID_ITfContextOwnerCompositionSink,
+                                          reinterpret_cast<IUnknown*>(ocSink), &ocCookie);
+            BridgeLog(L"TextBridge: advise ContextOwnerCompositionSink hr=%x\n", hrAdv);
+            ctxSource->Release();
+        }
         // 压入基础上下文并把焦点设到该文档（线程的 TSF 输入焦点）。
         hr = doc->Push(ctx);
         if (SUCCEEDED(hr))
@@ -157,6 +179,174 @@ namespace
     RemoteTextConnection g_connection{ nullptr };
     winrt::com_ptr<IWTSVirtualChannel> g_spC2SChannel;
     winrt::com_ptr<IWTSVirtualChannel> g_spS2CChannel;
+    ITfContext* g_context = nullptr;          // TSF 文档上下文（IME 写入目标）
+    winrt::com_ptr<ITfComposition> g_activeComposition;
+    uint32_t g_pduOpId = 0;
+
+    constexpr UINT32 PDU_CLIENT_ID = 1;       // 与 weston 侧注册一致
+    constexpr UINT32 PDU_CONTROL_ID = 1;
+    constexpr UINT32 PDU_HOST_ID = 1;
+
+    // 把一条 C2S PDU（含外层长度前缀 + 6 字节头）写往 weston。
+    void
+    SendPdu(UINT16 pduId, const std::vector<uint8_t>& payload)
+    {
+        if (!g_spC2SChannel)
+        {
+            return;
+        }
+        UINT32 inner = 2 + static_cast<UINT32>(payload.size());
+        UINT32 outer = 4 + inner;
+        std::vector<uint8_t> pdu;
+        pdu.reserve(outer);
+        auto put32 = [&pdu](UINT32 v) {
+            pdu.push_back((uint8_t)(v));
+            pdu.push_back((uint8_t)(v >> 8));
+            pdu.push_back((uint8_t)(v >> 16));
+            pdu.push_back((uint8_t)(v >> 24));
+        };
+        auto put16 = [&pdu](UINT16 v) {
+            pdu.push_back((uint8_t)(v));
+            pdu.push_back((uint8_t)(v >> 8));
+        };
+        put32(outer);
+        put32(inner);
+        put16(pduId);
+        pdu.insert(pdu.end(), payload.begin(), payload.end());
+
+        HRESULT hr = g_spC2SChannel->Write(
+            static_cast<ULONG>(pdu.size()), pdu.data(), nullptr);
+        if (FAILED(hr))
+        {
+            BridgeLog(L"TextBridge: SendPdu(0x%04x) write failed hr=%x\n", pduId, hr);
+        }
+    }
+
+    // UPDATE_COMPOSITION（组合串 → weston 的 preedit）。
+    void
+    SendComposition(const std::wstring& text, uint8_t action)
+    {
+        std::vector<uint8_t> payload;
+        auto put32 = [&payload](UINT32 v) {
+            payload.push_back((uint8_t)(v));
+            payload.push_back((uint8_t)(v >> 8));
+            payload.push_back((uint8_t)(v >> 16));
+            payload.push_back((uint8_t)(v >> 24));
+        };
+        put32(PDU_CLIENT_ID);
+        put32(PDU_CONTROL_ID);
+        put32(PDU_HOST_ID);
+        put32(++g_pduOpId);
+        payload.push_back(action);              // compositionAction
+        put32(1);                               // clausesCount = 1
+        put32((UINT32)text.size());             // clause 文本长度（UTF-16 字符数）
+        for (wchar_t c : text)
+        {
+            payload.push_back((uint8_t)c);
+            payload.push_back((uint8_t)((uint16_t)c >> 8));
+        }
+        put32(0);                               // clause range.begin
+        put32(0);                               // clause range.end
+        BridgeLog(L"TextBridge: -> UPDATE_COMPOSITION action=%u text=%.20s\n",
+                  action, text.c_str());
+        SendPdu(0x0204, payload);
+    }
+
+    // UPDATE_TEXT（确认文本 → weston 的 commit）。
+    void
+    SendUpdateText(const std::wstring& text)
+    {
+        std::vector<uint8_t> payload;
+        auto put32 = [&payload](UINT32 v) {
+            payload.push_back((uint8_t)(v));
+            payload.push_back((uint8_t)(v >> 8));
+            payload.push_back((uint8_t)(v >> 16));
+            payload.push_back((uint8_t)(v >> 24));
+        };
+        put32(PDU_CLIENT_ID);
+        put32(PDU_CONTROL_ID);
+        put32(PDU_HOST_ID);
+        put32(++g_pduOpId);
+        put32(0);                               // replaceBegin
+        put32(0);                               // replaceEnd（weston 按光标插入）
+        put32((UINT32)text.size());
+        for (wchar_t c : text)
+        {
+            payload.push_back((uint8_t)c);
+            payload.push_back((uint8_t)((uint16_t)c >> 8));
+        }
+        BridgeLog(L"TextBridge: -> UPDATE_TEXT text=%.20s\n", text.c_str());
+        SendPdu(0x0200, payload);
+    }
+
+    // 读取 TSF 组合范围的文本。
+    std::wstring
+    ReadCompositionText(TfEditCookie ec, ITfComposition* composition)
+    {
+        std::wstring out;
+        if (!composition)
+        {
+            return out;
+        }
+        wchar_t buf[1024];
+        ULONG got = 0;
+        // ITfComposition 继承 ITfRange，直接读范围文本。
+        HRESULT hr = composition->GetText(ec, 0, buf, 1023, &got);
+        if (SUCCEEDED(hr))
+        {
+            out.assign(buf, got);
+        }
+        else
+        {
+            BridgeLog(L"TextBridge: composition GetText failed hr=%x\n", hr);
+        }
+        return out;
+    }
+
+    // TSF 事件桥：组合开始/变化 → UPDATE_COMPOSITION（preedit）；
+    // 组合结束 → UPDATE_TEXT（提交）+ 空 UPDATE_COMPOSITION（清 preedit）。
+    struct BridgeTsfSink :
+        winrt::implements<BridgeTsfSink, ITfTextEditSink, ITfContextOwnerCompositionSink>
+    {
+        STDMETHODIMP
+        OnTextChange(TfEditCookie ec, ITfRange* pChange)
+        {
+            if (g_activeComposition)
+            {
+                auto text = ReadCompositionText(ec, g_activeComposition.get());
+                SendComposition(text, 2);   // UPDATE
+            }
+            return S_OK;
+        }
+
+        STDMETHODIMP
+        OnStartComposition(TfEditCookie ecWrite, ITfComposition* pComposition)
+        {
+            g_activeComposition.copy_from(pComposition);
+            BridgeLog(L"TextBridge: composition started\n");
+            return S_OK;
+        }
+
+        STDMETHODIMP
+        OnUpdateComposition(TfEditCookie ecWrite, ITfComposition* pComposition)
+        {
+            return S_OK;
+        }
+
+        STDMETHODIMP
+        OnEndComposition(TfEditCookie ecWrite, ITfComposition* pComposition)
+        {
+            auto text = ReadCompositionText(ecWrite, pComposition);
+            BridgeLog(L"TextBridge: composition ended, text=%.20s\n", text.c_str());
+            if (!text.empty())
+            {
+                SendUpdateText(text);
+            }
+            SendComposition(L"", 3);        // LEAVE：清 weston 的 preedit
+            g_activeComposition = nullptr;
+            return S_OK;
+        }
+    };
 
     // RegisterThread 看门狗：InputService 只对"已注册线程上的前台窗口"
     // 做 IME 路由（API 语义："registers a thread on which the client
