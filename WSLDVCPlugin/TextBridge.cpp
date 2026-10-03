@@ -202,6 +202,7 @@ namespace
         STDMETHODIMP
         OnTextChange(TfEditCookie ec, ITfRange* pChange)
         {
+            UNREFERENCED_PARAMETER(pChange);
             if (g_activeComposition)
             {
                 auto text = ReadCompositionText(ec, g_activeComposition.get());
@@ -221,6 +222,8 @@ namespace
         STDMETHODIMP
         OnUpdateComposition(TfEditCookie ecWrite, ITfComposition* pComposition)
         {
+            UNREFERENCED_PARAMETER(ecWrite);
+            UNREFERENCED_PARAMETER(pComposition);
             return S_OK;
         }
 
@@ -320,7 +323,7 @@ namespace
             auto teSink = sink.as<ITfTextEditSink>();
             DWORD teCookie = 0;
             HRESULT hrAdv = ctxSource->AdviseSink(IID_ITfTextEditSink,
-                                                  reinterpret_cast<IUnknown*>(teSink), &teCookie);
+                                                  teSink.get(), &teCookie);
             BridgeLog(L"TextBridge: advise TextEditSink hr=%x\n", hrAdv);
             auto ocSink = sink.as<ITfContextOwnerCompositionSink>();
             DWORD ocCookie = 0;
