@@ -557,8 +557,7 @@ namespace
         STDMETHODIMP OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly,
                                ITfEditRecord* pEditRecord) override
         {
-            BridgeLog(L"TextBridge: OnEndEdit fired
-");
+            BridgeLog(L"TextBridge: OnEndEdit fired");
             (void)pEditRecord;
             // 本会话 IME 写入存储的文本（选字时 IME 用最终中文覆写组合区间）
             if (g_textStore && !g_textStore->inserted.empty())
