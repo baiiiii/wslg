@@ -651,7 +651,7 @@ BridgeLog(const wchar_t* format, ...)
     va_end(args);
 
     FILE* f = nullptr;
-    if (_wfopen_s(&f, L"C:\ProgramData\wsltextbridge.log", L"a") == 0 && f)
+    if (_wfopen_s(&f, L"C:\\ProgramData\\wsltextbridge.log", L"a") == 0 && f)
     {
         SYSTEMTIME st;
         GetLocalTime(&st);
