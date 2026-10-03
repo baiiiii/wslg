@@ -212,9 +212,10 @@ namespace
         }
 
         STDMETHODIMP
-        OnStartComposition(TfEditCookie ecWrite, ITfComposition* pComposition)
+        OnStartComposition(TfEditCookie ecWrite, ITfComposition** ppComposition)
         {
-            g_activeComposition.copy_from(pComposition);
+            UNREFERENCED_PARAMETER(ecWrite);
+            if (ppComposition) { *ppComposition = nullptr; }
             BridgeLog(L"TextBridge: composition started\n");
             return S_OK;
         }
