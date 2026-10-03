@@ -58,6 +58,7 @@ namespace
     winrt::com_ptr<ITfComposition> g_activeComposition;
     winrt::com_ptr<ITfCompositionView> g_activeCompositionView;
     std::wstring g_lastCompositionText;   // OnEndEdit 缓存的组合串（提交用）
+    std::wstring g_pendingCommitText;     // IME 插入文本存储的最终文本（提交用）
     TfClientId g_clientId = 0;
     ITfThreadMgr* g_threadMgr = nullptr;
     ITfDocumentMgr* g_docMgr = nullptr;
@@ -200,6 +201,241 @@ namespace
     // TSF 事件桥：IME 组合/确认文本写入激活的上下文，桥读取后转为 PDU。
     // （签名按 msctf.h 实际定义）
     // ------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // 文本存储（ITextStoreACP，官方 TSF 应用开发标准模式）：给 IME 一个
+    // 可写的"文档"。没有它 IME 只能组合（候选窗可用）但无法把选中的
+    // 最终文本写入——选字后文本丢失。存储内容就是一个 wstring；IME 经
+    // 编辑会话（RequestLock 同步授权）读写。每次提交后清空，保证下次
+    // 组合从干净状态开始。
+    // ------------------------------------------------------------------
+    class BridgeTextStore final :
+        public ITextStoreACP
+    {
+        LONG m_ref = 1;
+
+    public:
+        std::wstring text;              // 文档内容
+        LONG selStart = 0, selEnd = 0;  // 选区（ACP 偏移）
+        std::wstring inserted;          // 最近一次编辑会话写入的文本
+
+        STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
+        {
+            if (!ppv) return E_POINTER;
+            if (riid == IID_IUnknown || riid == IID_ITextStoreACP)
+                *ppv = static_cast<ITextStoreACP*>(this);
+            else { *ppv = nullptr; return E_NOINTERFACE; }
+            AddRef();
+            return S_OK;
+        }
+        STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&m_ref); }
+        STDMETHODIMP_(ULONG) Release() override
+        {
+            ULONG r = InterlockedDecrement(&m_ref);
+            if (r == 0) delete this;
+            return r;
+        }
+
+        STDMETHODIMP AdviseSink(REFIID riid, IUnknown* punk, DWORD dwMask) override
+        { (void)riid; (void)punk; (void)dwMask; return S_OK; }
+        STDMETHODIMP UnadviseSink(IUnknown* punk) override
+        { (void)punk; return S_OK; }
+
+        // 编辑锁：同步授权（TSF 管理器随后调用编辑会话的 OnLockGranted）
+        STDMETHODIMP RequestLock(DWORD dwLockFlags, HRESULT* phrSession) override
+        {
+            (void)dwLockFlags;
+            if (!phrSession) return E_INVALIDARG;
+            *phrSession = S_OK;
+            return S_OK;
+        }
+
+        STDMETHODIMP GetStatus(TS_STATUS* pdyn) override
+        {
+            if (!pdyn) return E_INVALIDARG;
+            memset(pdyn, 0, sizeof(TS_STATUS));
+            pdyn->dwStaticFlags = TS_SS_NOHIDDENTEXT;
+            return S_OK;
+        }
+
+        STDMETHODIMP QueryInsert(long acpTestStart, long acpTestEnd,
+                                 ULONG cch, long* pacpResultStart,
+                                 long* pacpResultEnd) override
+        {
+            (void)cch;
+            if (acpTestStart < 0 || acpTestEnd > (long)text.size())
+                return E_INVALIDARG;
+            if (pacpResultStart) *pacpResultStart = acpTestStart;
+            if (pacpResultEnd) *pacpResultEnd = acpTestStart + (long)cch;
+            return S_OK;
+        }
+
+        STDMETHODIMP GetSelection(ULONG ulIndex, ULONG ulCount,
+                                  TS_SELECTION_ACP* pSelection,
+                                  ULONG* pcFetched) override
+        {
+            if (!pSelection || !pcFetched) return E_INVALIDARG;
+            *pcFetched = 0;
+            if (ulIndex != 0 || ulCount < 1) return S_OK;   // 仅支持默认选区
+            pSelection[0].acpStart = selStart;
+            pSelection[0].acpEnd = selEnd;
+            pSelection[0].style.ase = TS_AE_END;
+            pSelection[0].style.fInterimChar = FALSE;
+            *pcFetched = 1;
+            return S_OK;
+        }
+
+        STDMETHODIMP SetSelection(ULONG ulCount,
+                                  const TS_SELECTION_ACP* pSelection) override
+        {
+            if (!pSelection || ulCount < 1) return E_INVALIDARG;
+            selStart = pSelection[0].acpStart;
+            selEnd = pSelection[0].acpEnd;
+            return S_OK;
+        }
+
+        STDMETHODIMP GetText(long acpStart, long acpEnd, WCHAR* pchPlain,
+                             ULONG cchPlainReq, ULONG* pcchPlainRet,
+                             TS_RUNINFO* prgRunInfo, ULONG cRunInfoReq,
+                             ULONG* pcRunInfoRet, long* pacpStart,
+                             long* pacpEnd) override
+        {
+            if (pcchPlainRet) *pcchPlainRet = 0;
+            if (pcRunInfoRet) *pcRunInfoRet = 0;
+            if (acpStart < 0) acpStart = 0;
+            long docEnd = (long)text.size();
+            if (acpEnd == -1 || acpEnd > docEnd) acpEnd = docEnd;
+            if (acpStart > acpEnd) acpStart = acpEnd;
+
+            ULONG copy = (ULONG)(acpEnd - acpStart);
+            if (cchPlainReq && pchPlain)
+            {
+                if (copy > cchPlainReq) copy = cchPlainReq;
+                memcpy(pchPlain, text.c_str() + acpStart,
+                       copy * sizeof(WCHAR));
+                if (pcchPlainRet) *pcchPlainRet = copy;
+            }
+            if (cRunInfoReq && prgRunInfo && copy > 0)
+            {
+                prgRunInfo[0].uType = TS_RT_PLAIN;
+                prgRunInfo[0].uCount = copy;
+                if (pcRunInfoRet) *pcRunInfoRet = 1;
+            }
+            if (pacpStart) *pacpStart = acpStart;
+            if (pacpEnd) *pacpEnd = acpStart + (long)copy;
+            return S_OK;
+        }
+
+        STDMETHODIMP SetText(DWORD dwFlags, long acpStart, long acpEnd,
+                             const WCHAR* pchText, ULONG cch,
+                             TS_TEXTCHANGE* pChange) override
+        {
+            (void)dwFlags;
+            if (acpStart < 0) acpStart = 0;
+            if (acpEnd > (long)text.size()) acpEnd = (long)text.size();
+            if (acpStart > acpEnd) return E_INVALIDARG;
+            if (!pchText && cch > 0) return E_INVALIDARG;
+
+            text = text.substr(0, acpStart) + std::wstring(pchText, cch) +
+                   text.substr(acpEnd);
+            inserted.assign(pchText, cch);
+            selStart = acpStart + (long)cch;
+            selEnd = selStart;
+            if (pChange)
+            {
+                pChange->acpStart = acpStart;
+                pChange->acpOldEnd = acpEnd;
+                pChange->acpNewEnd = acpStart + (long)cch;
+            }
+            return S_OK;
+        }
+
+        STDMETHODIMP InsertEmbedded(DWORD dwFlags, long acpStart, long acpEnd,
+                                    TS_OBJECTID acpObject,
+                                    TS_TEXTCHANGE* pChange) override
+        { (void)dwFlags; (void)acpStart; (void)acpEnd; (void)acpObject;
+          (void)pChange; return E_NOTIMPL; }
+
+        STDMETHODIMP InsertTextAtSelection(DWORD dwFlags, const WCHAR* pchText,
+                                           ULONG cch, long* pacpStart,
+                                           long* pacpEnd) override
+        {
+            (void)dwFlags;
+            if (!pchText && cch > 0) return E_INVALIDARG;
+            selStart = selEnd;
+            text.insert(selEnd, std::wstring(pchText, cch));
+            inserted.assign(pchText, cch);
+            if (pacpStart) *pacpStart = selEnd;
+            selEnd += (long)cch;
+            selStart = selEnd;
+            if (pacpEnd) *pacpEnd = selEnd;
+            return S_OK;
+        }
+
+        STDMETHODIMP GetEmbedded(long acpPos, REFGUID rguidService,
+                                 REFIID riid, IUnknown** ppunk) override
+        { (void)acpPos; (void)rguidService; (void)riid; (void)ppunk;
+          return E_NOTIMPL; }
+
+        STDMETHODIMP QueryInsertEmbedded(const GUID* pguidService,
+                                         const FORMATETC* pFormatEtc,
+                                         BOOL* pfInsertable) override
+        { (void)pguidService; (void)pFormatEtc;
+          if (pfInsertable) *pfInsertable = FALSE; return S_OK; }
+
+        STDMETHODIMP GetFormattedText(long acpStart, long acpEnd,
+                                      IDataObject** ppDataObject) override
+        { (void)acpStart; (void)acpEnd; (void)ppDataObject; return E_NOTIMPL; }
+
+        STDMETHODIMP GetSupportedServices(ULONG ulCount, GUID* pguid,
+                                          ULONG* pcFetched) override
+        { (void)ulCount; (void)pguid; if (pcFetched) *pcFetched = 0;
+          return S_OK; }
+
+        STDMETHODIMP GetAppProperty(REFGUID rguidProperty, ITfRange** ppRange,
+                                    ITfPropertyProps** ppProp) override
+        { (void)rguidProperty; if (ppRange) *ppRange = nullptr;
+          if (ppProp) *ppProp = nullptr; return E_NOTIMPL; }
+
+        STDMETHODIMP GetProperty(REFGUID rguidProperty, ITfRange** ppRange,
+                                 ITfPropertyProps** ppProp) override
+        { (void)rguidProperty; if (ppRange) *ppRange = nullptr;
+          if (ppProp) *ppProp = nullptr; return E_NOTIMPL; }
+
+        STDMETHODIMP RequestPropertyTransition(REFGUID rguidProperty) override
+        { (void)rguidProperty; return E_NOTIMPL; }
+
+        STDMETHODIMP FindNextAttrTransition(long acpStart, long acpHalt,
+                                            ULONG cchFilter,
+                                            const TS_ATTRID* paAttrFilter,
+                                            DWORD dwFlags, long* pacpNext,
+                                            BOOL* pfFound,
+                                            long* plFoundOffset) override
+        { (void)acpStart; (void)acpHalt; (void)cchFilter; (void)paAttrFilter;
+          (void)dwFlags; if (pacpNext) *pacpNext = acpHalt;
+          if (pfFound) *pfFound = FALSE; if (plFoundOffset) *plFoundOffset = 0;
+          return S_OK; }
+
+        STDMETHODIMP RequestAttrsTransitioning(long acpPos) override
+        { (void)acpPos; return S_OK; }
+
+        STDMETHODIMP RequestSupportedAttrs(DWORD dwFlags, ULONG cFilterAttrs,
+                                           const TS_ATTRID* paAttrFilter) override
+        { (void)dwFlags; (void)cFilterAttrs; (void)paAttrFilter; return S_OK; }
+
+        STDMETHODIMP GetEnd(long* pacpEnd) override
+        { if (!pacpEnd) return E_INVALIDARG; *pacpEnd = (long)text.size();
+          return S_OK; }
+
+        void Reset()
+        {
+            text.clear();
+            selStart = selEnd = 0;
+            inserted.clear();
+        }
+    };
+
+    BridgeTextStore* g_textStore = nullptr;   // 全局存储（传给 CreateContext）
+
     // TSF 事件 sink：手写 IUnknown（官方 TSF 示例的标准做法；
     // winrt::implements 对经典 COM 接口的 QI 不被 AdviseSink 接受，
     // 返回 CONNECT_E_CANNOTCONNECT）。
@@ -246,6 +482,10 @@ namespace
                                ITfEditRecord* pEditRecord) override
         {
             (void)pEditRecord;
+            // 本会话 IME 写入存储的文本（选字时 IME 用最终中文覆写组合区间）
+            if (g_textStore && !g_textStore->inserted.empty())
+                g_pendingCommitText = g_textStore->inserted;
+
             ITfContextComposition* cc = nullptr;
             HRESULT hr = pic->QueryInterface(IID_ITfContextComposition,
                                              reinterpret_cast<void**>(&cc));
@@ -287,15 +527,24 @@ namespace
                 g_lastCompositionText = text;
                 SendComposition(text, 2);   // UPDATE preedit
                 BridgeLog(L"TextBridge: preedit len=%u\n", (UINT32)text.size());
+                g_pendingCommitText.clear();   // 组合仍活跃，提交文本未定
             }
-            else if (!g_lastCompositionText.empty())
+            else if (!g_pendingCommitText.empty() ||
+                     !g_lastCompositionText.empty())
             {
-                // 组合结束（选字确认）：提交最终文本
+                // 组合结束（选字确认）：提交 IME 写入存储的最终文本；
+                // 存储无写入时退回最后组合串。提交后清空存储保证下次
+                // 组合从干净状态开始。
+                const std::wstring& commit = !g_pendingCommitText.empty()
+                    ? g_pendingCommitText : g_lastCompositionText;
                 BridgeLog(L"TextBridge: commit len=%u\n",
-                          (UINT32)g_lastCompositionText.size());
-                SendUpdateText(g_lastCompositionText);
+                          (UINT32)commit.size());
+                SendUpdateText(commit);
                 SendComposition(L"", 3);   // LEAVE 清 preedit
                 g_lastCompositionText.clear();
+                g_pendingCommitText.clear();
+                if (g_textStore)
+                    g_textStore->Reset();
             }
             return S_OK;
         }
@@ -396,7 +645,7 @@ namespace
             return;
         }
         TfEditCookie ec = 0;
-        hr = doc->CreateContext(clientId, 0, nullptr, &ctx, &ec);
+        hr = doc->CreateContext(clientId, 0, g_textStore, &ctx, &ec);
         if (FAILED(hr) || !ctx)
         {
             BridgeLog(L"TextBridge: CreateContext failed hr=%x\n", hr);
@@ -687,6 +936,10 @@ TextBridge::Start(_In_ IWTSVirtualChannelManager* pChannelMgr)
         return hr;
     }
     spListener = nullptr;
+
+    // 文本存储：交给 CreateContext，使 IME 能把选中的最终文本写入。
+    if (!g_textStore)
+        g_textStore = new BridgeTextStore();
 
     // 创建 RemoteTextConnection 并启用文本输入虚拟化。
     try
