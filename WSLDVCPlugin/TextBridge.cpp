@@ -639,3 +639,24 @@ TextBridge::Start(_In_ IWTSVirtualChannelManager* pChannelMgr)
 
     return S_OK;
 }
+
+// 桥的独立文件日志实现（追加到 msrdc 可读的固定路径，现场诊断用）。
+void
+BridgeLog(const wchar_t* format, ...)
+{
+    wchar_t buf[512];
+    va_list args;
+    va_start(args, format);
+    _vsnwprintf_s(buf, _TRUNCATE, format, args);
+    va_end(args);
+
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, L"C:\ProgramData\wsltextbridge.log", L"a") == 0 && f)
+    {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        fwprintf(f, L"[%02d:%02d:%02d.%03d] %s\n",
+                 st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
+        fclose(f);
+    }
+}
