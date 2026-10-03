@@ -231,8 +231,7 @@ namespace
         OnStartComposition(ITfCompositionView* pComposition, BOOL* pfAccepted)
         {
             g_activeCompositionView.copy_from(pComposition);
-            BridgeLog(L"TextBridge: composition started
-");
+            BridgeLog(L"TextBridge: composition started");
             if (pfAccepted) { *pfAccepted = TRUE; }
             return S_OK;
         }
@@ -250,8 +249,7 @@ namespace
         STDMETHODIMP
         OnEndComposition(ITfCompositionView* pComposition)
         {
-            BridgeLog(L"TextBridge: composition ended
-");
+            BridgeLog(L"TextBridge: composition ended");
             if (g_context && g_clientId && pComposition)
             {
                 struct ReadSession :
@@ -285,8 +283,7 @@ namespace
                     g_clientId, session.get(), TF_ES_READ | TF_ES_SYNC, &hrSession);
                 if (SUCCEEDED(hr) && SUCCEEDED(hrSession) && !session->text.empty())
                 {
-                    BridgeLog(L"TextBridge: commit len=%u
-", (UINT32)session->text.size());
+                    BridgeLog(L"TextBridge: commit len=%u", (UINT32)session->text.size());
                     SendUpdateText(session->text);
                     SendComposition(L"", 3);    // LEAVE：清 preedit
                 }
