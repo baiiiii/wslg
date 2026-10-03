@@ -172,7 +172,7 @@ namespace
             return out;
         }
         ITfRange* range = nullptr;
-        HRESULT hr = composition->GetRange(ec, &range);
+        HRESULT hr = composition->GetRange(&range);
         if (FAILED(hr) || !range)
         {
             BridgeLog(L"TextBridge: composition GetRange failed hr=%x\n", hr);
@@ -317,15 +317,15 @@ namespace
         if (SUCCEEDED(hr) && ctxSource)
         {
             auto sink = winrt::make<BridgeTsfSink>();
-            ITfTextEditSink* teSink = sink.as<ITfTextEditSink>();
+            auto teSink = sink.as<ITfTextEditSink>();
             DWORD teCookie = 0;
             HRESULT hrAdv = ctxSource->AdviseSink(IID_ITfTextEditSink,
                                                   reinterpret_cast<IUnknown*>(teSink), &teCookie);
             BridgeLog(L"TextBridge: advise TextEditSink hr=%x\n", hrAdv);
-            ITfContextOwnerCompositionSink* ocSink = sink.as<ITfContextOwnerCompositionSink>();
+            auto ocSink = sink.as<ITfContextOwnerCompositionSink>();
             DWORD ocCookie = 0;
             hrAdv = ctxSource->AdviseSink(IID_ITfContextOwnerCompositionSink,
-                                          reinterpret_cast<IUnknown*>(ocSink), &ocCookie);
+                                          ocSink.get(), &ocCookie);
             BridgeLog(L"TextBridge: advise ContextOwnerCompositionSink hr=%x\n", hrAdv);
             ctxSource->Release();
         }
