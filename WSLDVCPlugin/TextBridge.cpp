@@ -864,22 +864,10 @@ namespace
             {
                 EnumContext ctx{ pid, {}, iteration < 2 };
                 EnumWindows(CollectRemoteUiThread, reinterpret_cast<LPARAM>(&ctx));
-                for (DWORD tid : ctx.tids)
-                {
-                    if (g_registeredThreads.insert(tid).second)
-                    {
-                        try
-                        {
-                            g_connection.RegisterThread(tid);
-                            BridgeLog(L"TextBridge: RegisterThread(%u)\n", tid);
-                        }
-                        catch (winrt::hresult_error const& e)
-                        {
-                            BridgeLog(L"TextBridge: RegisterThread(%u) failed hr=%x\n",
-                                      tid, e.code());
-                        }
-                    }
-                }
+                // RegisterThread 已禁用：实测线程注册后 InputService
+                // 会把该线程标记为远程 UI 线程并抑制本地 IME（等待永不
+                // 到来的远程组合驱动），候选窗消失。出候选依赖的是
+                // 本地 TSF 激活（RAIL_WINDOW 钩子），注册反而有害。
                 ++iteration;
             }
             for (int i = 0; i < 30 && !g_watchdogStop; ++i)
