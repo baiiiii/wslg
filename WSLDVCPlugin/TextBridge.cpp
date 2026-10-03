@@ -564,17 +564,27 @@ namespace
             // 变更文本即中文（否则为空，退回组合串缓存）。
             std::wstring changedText;
             {
-                ITfRange* chRange = nullptr;
+                IEnumTfRanges* chEnum = nullptr;
                 HRESULT hrCh = pEditRecord->GetTextAndPropertyUpdates(
-                    0, nullptr, 0, &chRange);
-                if (SUCCEEDED(hrCh) && chRange)
+                    0, nullptr, 0, &chEnum);
+                if (SUCCEEDED(hrCh) && chEnum)
                 {
-                    wchar_t buf[1024];
-                    ULONG got = 0;
-                    if (SUCCEEDED(chRange->GetText(ecReadOnly, 0, buf,
-                                                   1023, &got)))
-                        changedText.assign(buf, got);
-                    chRange->Release();
+                    ITfRange* chRange = nullptr;
+                    ULONG fetchedCh = 0;
+                    while (chEnum->Next(1, &chRange, &fetchedCh) == S_OK &&
+                           fetchedCh == 1)
+                    {
+                        if (changedText.empty())
+                        {
+                            wchar_t buf[1024];
+                            ULONG got = 0;
+                            if (SUCCEEDED(chRange->GetText(ecReadOnly, 0,
+                                                           buf, 1023, &got)))
+                                changedText.assign(buf, got);
+                        }
+                        chRange->Release();
+                    }
+                    chEnum->Release();
                 }
             }
 
