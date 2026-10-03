@@ -399,6 +399,35 @@ namespace
         }
     };
 
+    // TSF 事件 sink：手写 IUnknown（官方 TSF 示例的标准做法；
+    // winrt::implements 对经典 COM 接口的 QI 不被 AdviseSink 接受，
+    // 返回 CONNECT_E_CANNOTCONNECT）。
+    class BridgeTsfSink final :
+        public ITfTextEditSink,
+        public ITfContextOwnerCompositionSink
+    {
+        LONG m_ref = 1;
+
+    public:
+        STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
+        {
+            if (!ppv) return E_POINTER;
+            if (riid == IID_IUnknown || riid == IID_ITfTextEditSink)
+            {
+                *ppv = static_cast<ITfTextEditSink*>(this);
+            }
+            else if (riid == IID_ITfContextOwnerCompositionSink)
+            {
+                *ppv = static_cast<ITfContextOwnerCompositionSink*>(this);
+            }
+            else
+            {
+                *ppv = nullptr;
+                return E_NOINTERFACE;
+            }
+            AddRef();
+            return S_OK;
+        }
                 STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&m_ref); }
         STDMETHODIMP_(ULONG) Release() override
         {
