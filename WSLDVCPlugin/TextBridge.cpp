@@ -820,7 +820,8 @@ namespace
                 GUID profile = {};
                 CLSIDFromString(L"{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E356}", &clsid);
                 CLSIDFromString(L"{FA550B04-5AD7-411F-A5AC-CA038EC515D7}", &profile);
-                hrProf = profiles->ActivateLanguageProfile(0x0804, clsid, profile);
+                hrProf = profiles->ActivateLanguageProfile(
+                    GUID_TFCAT_TIP_KEYBOARD, 0x0804, clsid);
                 BridgeLog(L"TextBridge: ActivateLanguageProfile(MS Pinyin) hr=%x\n",
                           hrProf);
                 profiles->Release();
