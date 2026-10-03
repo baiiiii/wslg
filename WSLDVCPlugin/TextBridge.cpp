@@ -475,6 +475,8 @@ namespace
 
         STDMETHODIMP GetScreenExt(TsViewCookie vcView, RECT* prc) override
         {
+            BridgeLog(L"TextBridge: IME querying GetScreenExt
+");
             (void)vcView;
             if (!prc) return E_INVALIDARG;
             *prc = RailWindowRect();
@@ -484,6 +486,8 @@ namespace
         STDMETHODIMP GetTextExt(TsViewCookie vcView, LONG acpStart,
                                 LONG acpEnd, RECT* prc, BOOL* pfClipped) override
         {
+            BridgeLog(L"TextBridge: IME querying GetTextExt
+");
             (void)vcView; (void)acpStart; (void)acpEnd;
             if (!prc || !pfClipped) return E_INVALIDARG;
             *prc = RailWindowRect();
@@ -555,6 +559,8 @@ namespace
         STDMETHODIMP OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly,
                                ITfEditRecord* pEditRecord) override
         {
+            BridgeLog(L"TextBridge: OnEndEdit fired
+");
             (void)pEditRecord;
             // 本会话 IME 写入存储的文本（选字时 IME 用最终中文覆写组合区间）
             if (g_textStore && !g_textStore->inserted.empty())
