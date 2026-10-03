@@ -816,14 +816,32 @@ namespace
                                               reinterpret_cast<void**>(&profiles));
             if (SUCCEEDED(hrProf) && profiles)
             {
-                CLSID clsid = {};
-                GUID profile = {};
-                CLSIDFromString(L"{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}", &clsid);
-                CLSIDFromString(L"{FA550B04-5AD7-411F-A5AC-CA038EC515D7}", &profile);
-                hrProf = profiles->ActivateLanguageProfile(
-                    GUID_TFCAT_TIP_KEYBOARD, 0x0804, clsid);
-                BridgeLog(L"TextBridge: ActivateLanguageProfile(MS Pinyin) hr=%x\n",
-                          hrProf);
+                // 新版接口：支持 TF_IPP_ 标志位（旧接口 E_FAIL 时备用）
+                ITfInputProcessorProfileMgr* mgr = nullptr;
+                hrProf = profiles->QueryInterface(IID_ITfInputProcessorProfileMgr,
+                                                  reinterpret_cast<void**>(&mgr));
+                if (SUCCEEDED(hrProf) && mgr)
+                {
+                    CLSID clsid = {};
+                    GUID profile = {};
+                    CLSIDFromString(L"{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}", &clsid);
+                    CLSIDFromString(L"{FA550B04-5AD7-411F-A5AC-CA038EC515D7}", &profile);
+                    hrProf = mgr->ActivateProfile(
+                        TF_PROFILETYPE_INPUTPROCESSOR, 0x0804, clsid, profile,
+                        nullptr, 0);
+                    BridgeLog(L"TextBridge: mgr ActivateProfile(MS Pinyin) hr=%x\n",
+                              hrProf);
+                    mgr->Release();
+                }
+                else
+                {
+                    CLSID clsid = {};
+                    CLSIDFromString(L"{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}", &clsid);
+                    hrProf = profiles->ActivateLanguageProfile(
+                        GUID_TFCAT_TIP_KEYBOARD, 0x0804, clsid);
+                    BridgeLog(L"TextBridge: ActivateLanguageProfile(MS Pinyin) hr=%x\n",
+                              hrProf);
+                }
                 profiles->Release();
             }
         }
