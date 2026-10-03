@@ -289,8 +289,7 @@ namespace
                 }
                 else
                 {
-                    BridgeLog(L"TextBridge: read session failed hr=%x/%x
-", hr, hrSession);
+                    BridgeLog(L"TextBridge: read session failed hr=%x/%x\n", hr, hrSession);
                 }
             }
             g_activeCompositionView = nullptr;
