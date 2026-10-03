@@ -372,17 +372,24 @@ namespace
         hr = ctx->QueryInterface(IID_ITfSource, reinterpret_cast<void**>(&ctxSource));
         if (SUCCEEDED(hr) && ctxSource)
         {
-            auto sink = winrt::make<BridgeTsfSink>();
-            auto teSink = sink.as<ITfTextEditSink>();
+            // 手写 QI 的 sink：AdviseSink 内部会 QI 两个 IID 并 AddRef。
+            ITfTextEditSink* teSink = new BridgeTsfSink();
             DWORD teCookie = 0;
             HRESULT hrAdv = ctxSource->AdviseSink(IID_ITfTextEditSink,
-                                                  teSink.get(), &teCookie);
+                                                  teSink, &teCookie);
             BridgeLog(L"TextBridge: advise TextEditSink hr=%x\n", hrAdv);
-            auto ocSink = sink.as<ITfContextOwnerCompositionSink>();
-            DWORD ocCookie = 0;
-            hrAdv = ctxSource->AdviseSink(IID_ITfContextOwnerCompositionSink,
-                                          ocSink.get(), &ocCookie);
-            BridgeLog(L"TextBridge: advise ContextOwnerCompositionSink hr=%x\n", hrAdv);
+            ITfContextOwnerCompositionSink* ocSink = nullptr;
+            hrAdv = teSink->QueryInterface(IID_ITfContextOwnerCompositionSink,
+                                           reinterpret_cast<void**>(&ocSink));
+            if (SUCCEEDED(hrAdv))
+            {
+                DWORD ocCookie = 0;
+                hrAdv = ctxSource->AdviseSink(IID_ITfContextOwnerCompositionSink,
+                                              ocSink, &ocCookie);
+                BridgeLog(L"TextBridge: advise ContextOwnerCompositionSink hr=%x\n", hrAdv);
+                ocSink->Release();
+            }
+            teSink->Release();   // AdviseSink 持有引用
             ctxSource->Release();
         }
 
