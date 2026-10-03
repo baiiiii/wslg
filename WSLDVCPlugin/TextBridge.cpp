@@ -58,12 +58,10 @@ namespace
     winrt::com_ptr<ITfComposition> g_activeComposition;
     winrt::com_ptr<ITfCompositionView> g_activeCompositionView;
     std::wstring g_lastCompositionText;   // OnEndEdit 缓存的组合串（提交用）
-    BOOL g_sinkAdvised = FALSE;           // TextEditSink 挂接成功标志
     std::wstring g_pendingCommitText;     // IME 插入文本存储的最终文本（提交用）
     TfClientId g_clientId = 0;
     ITfThreadMgr* g_threadMgr = nullptr;
     ITfDocumentMgr* g_docMgr = nullptr;
-    ITfKeystrokeMgr* g_keystrokeMgr = nullptr;   // 按键路由（IME 收键的通道）
     HWND g_railHwnd = nullptr;
     HHOOK g_tsfHook = nullptr;
     bool g_tsfActivated = false;
@@ -214,7 +212,6 @@ namespace
         public ITextStoreACP
     {
         LONG m_ref = 1;
-        ITextStoreACPSink* m_pSink = nullptr;
 
     public:
         std::wstring text;              // 文档内容
@@ -238,32 +235,17 @@ namespace
             return r;
         }
 
-        // TSF 编辑锁 sink：RequestLock 同步授权时必须调用
-        // ITextStoreACPSink::OnLockGranted 触发待决编辑会话——
-        // 此前只回 S_OK 不调回调，IME 的编辑会话永远不执行，
-        // 导致挂存储后 IME 无法组合（候选窗消失）。
         STDMETHODIMP AdviseSink(REFIID riid, IUnknown* punk, DWORD dwMask) override
-        {
-            (void)riid; (void)dwMask;
-            if (!punk) return E_INVALIDARG;
-            m_pSink = nullptr;
-            HRESULT hr = punk->QueryInterface(IID_ITextStoreACPSink,
-                                              reinterpret_cast<void**>(&m_pSink));
-            return hr;
-        }
+        { (void)riid; (void)punk; (void)dwMask; return S_OK; }
         STDMETHODIMP UnadviseSink(IUnknown* punk) override
-        {
-            (void)punk;
-            if (m_pSink) { m_pSink->Release(); m_pSink = nullptr; }
-            return S_OK;
-        }
+        { (void)punk; return S_OK; }
 
+        // 编辑锁：同步授权（TSF 管理器随后调用编辑会话的 OnLockGranted）
         STDMETHODIMP RequestLock(DWORD dwLockFlags, HRESULT* phrSession) override
         {
+            (void)dwLockFlags;
             if (!phrSession) return E_INVALIDARG;
-            if (!m_pSink) { *phrSession = TF_E_SYNCHRONOUS; return S_OK; }
-            // 同步授权：OnLockGranted 返回值即会话执行结果
-            *phrSession = m_pSink->OnLockGranted(dwLockFlags);
+            *phrSession = S_OK;
             return S_OK;
         }
 
@@ -576,34 +558,10 @@ namespace
                                ITfEditRecord* pEditRecord) override
         {
             BridgeLog(L"TextBridge: OnEndEdit fired");
-            // vacant 上下文（无存储）：用 pEditRecord 取本会话变更文本
-            // ——组合期间即新组合串；选字确认时若 IME 成功写入最终中文，
-            // 变更文本即中文（否则为空，退回组合串缓存）。
-            std::wstring changedText;
-            {
-                IEnumTfRanges* chEnum = nullptr;
-                HRESULT hrCh = pEditRecord->GetTextAndPropertyUpdates(
-                    0, nullptr, 0, &chEnum);
-                if (SUCCEEDED(hrCh) && chEnum)
-                {
-                    ITfRange* chRange = nullptr;
-                    ULONG fetchedCh = 0;
-                    while (chEnum->Next(1, &chRange, &fetchedCh) == S_OK &&
-                           fetchedCh == 1)
-                    {
-                        if (changedText.empty())
-                        {
-                            wchar_t buf[1024];
-                            ULONG got = 0;
-                            if (SUCCEEDED(chRange->GetText(ecReadOnly, 0,
-                                                           buf, 1023, &got)))
-                                changedText.assign(buf, got);
-                        }
-                        chRange->Release();
-                    }
-                    chEnum->Release();
-                }
-            }
+            (void)pEditRecord;
+            // 本会话 IME 写入存储的文本（选字时 IME 用最终中文覆写组合区间）
+            if (g_textStore && !g_textStore->inserted.empty())
+                g_pendingCommitText = g_textStore->inserted;
 
             ITfContextComposition* cc = nullptr;
             HRESULT hr = pic->QueryInterface(IID_ITfContextComposition,
@@ -643,21 +601,19 @@ namespace
 
             if (hasComposition)
             {
-                // 组合活跃：优先变更文本，退回组合串
-                const std::wstring& preedit =
-                    !changedText.empty() ? changedText : text;
-                g_lastCompositionText = preedit;
-                SendComposition(preedit, 2);   // UPDATE preedit
-                BridgeLog(L"TextBridge: preedit len=%u",
-                          (UINT32)preedit.size());
+                g_lastCompositionText = text;
+                SendComposition(text, 2);   // UPDATE preedit
+                BridgeLog(L"TextBridge: preedit len=%u\n", (UINT32)text.size());
                 g_pendingCommitText.clear();   // 组合仍活跃，提交文本未定
             }
-            else if (!changedText.empty() || !g_lastCompositionText.empty())
+            else if (!g_pendingCommitText.empty() ||
+                     !g_lastCompositionText.empty())
             {
-                // 组合结束（选字确认）：优先变更文本（选中的最终中文），
-                // 退回最后组合串。提交后清空。
-                const std::wstring& commit = !changedText.empty()
-                    ? changedText : g_lastCompositionText;
+                // 组合结束（选字确认）：提交 IME 写入存储的最终文本；
+                // 存储无写入时退回最后组合串。提交后清空存储保证下次
+                // 组合从干净状态开始。
+                const std::wstring& commit = !g_pendingCommitText.empty()
+                    ? g_pendingCommitText : g_lastCompositionText;
                 BridgeLog(L"TextBridge: commit len=%u\n",
                           (UINT32)commit.size());
                 SendUpdateText(commit);
@@ -665,7 +621,7 @@ namespace
                 g_lastCompositionText.clear();
                 g_pendingCommitText.clear();
                 if (g_textStore)
-                    g_textStore->Reset();   // 清空存储，下次组合干净开始
+                    g_textStore->Reset();
             }
             return S_OK;
         }
@@ -766,7 +722,7 @@ namespace
             return;
         }
         TfEditCookie ec = 0;
-        hr = doc->CreateContext(clientId, 0, g_textStore, &ctx, &ec);
+        hr = doc->CreateContext(clientId, 0, nullptr, &ctx, &ec);
         if (FAILED(hr) || !ctx)
         {
             BridgeLog(L"TextBridge: CreateContext failed hr=%x\n", hr);
@@ -780,6 +736,8 @@ namespace
         // （见下方），不再挂接 sink——挂接的 TextEditSink 与文本存储
         // 是"出候选配置"中没有的两个变量，属候选窗消失的嫌疑项，
         // 先全部摘除以回归已验证基线。
+        ctxSource = nullptr;
+        (void)ctxSource;
 
         hr = doc->Push(ctx);
         if (SUCCEEDED(hr))
@@ -787,106 +745,6 @@ namespace
             hr = tm->SetFocus(doc);
         }
         BridgeLog(L"TextBridge: Push/SetFocus(doc) hr=%x\n", hr);
-
-        // 挂接 TextEditSink（手写 QI）：OnEndEdit 驱动组合文本捕获。
-        // 实测单独挂接与候选窗是否出现的关系待验证——文本存储已确认
-        // 破坏 IME 参与，sink 单独从未测过。
-        ITfSource* ctxSource = nullptr;
-        hr = ctx->QueryInterface(IID_ITfSource, reinterpret_cast<void**>(&ctxSource));
-        if (SUCCEEDED(hr) && ctxSource)
-        {
-            ITfTextEditSink* teSink = new BridgeTsfSink();
-            DWORD teCookie = 0;
-            HRESULT hrAdv = ctxSource->AdviseSink(IID_ITfTextEditSink,
-                                                  teSink, &teCookie);
-            BridgeLog(L"TextBridge: advise TextEditSink hr=%x\n", hrAdv);
-            if (SUCCEEDED(hrAdv)) { g_sinkAdvised = TRUE; }
-            teSink->Release();
-            ctxSource->Release();
-        }
-
-        // 激活微软拼音配置档：TSF Activate 默认档很可能是英文键盘，
-        // 不显式激活中文 IME 则 IME 的按键 sink 不消费任何键。
-        // CLSID/Profile 取自客户端 UPDATE_INPUT_PROFILE PDU（实测捕获）。
-        {
-            ITfInputProcessorProfiles* profiles = nullptr;
-            HRESULT hrProf = CoCreateInstance(CLSID_TF_InputProcessorProfiles,
-                                              nullptr, CLSCTX_INPROC_SERVER,
-                                              IID_ITfInputProcessorProfiles,
-                                              reinterpret_cast<void**>(&profiles));
-            if (SUCCEEDED(hrProf) && profiles)
-            {
-                // 新版接口：支持 TF_IPP_ 标志位（旧接口 E_FAIL 时备用）
-                ITfInputProcessorProfileMgr* mgr = nullptr;
-                hrProf = profiles->QueryInterface(IID_ITfInputProcessorProfileMgr,
-                                                  reinterpret_cast<void**>(&mgr));
-                if (SUCCEEDED(hrProf) && mgr)
-                {
-                    CLSID clsid = {};
-                    GUID profile = {};
-                    CLSIDFromString(L"{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}", &clsid);
-                    CLSIDFromString(L"{FA550B04-5AD7-411F-A5AC-CA038EC515D7}", &profile);
-                    hrProf = mgr->ActivateProfile(
-                        TF_PROFILETYPE_INPUTPROCESSOR, 0x0804, clsid, profile,
-                        nullptr, 0);
-                    BridgeLog(L"TextBridge: mgr ActivateProfile(MS Pinyin) hr=%x\n",
-                              hrProf);
-                    mgr->Release();
-                }
-                else
-                {
-                    CLSID clsid = {};
-                    CLSIDFromString(L"{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}", &clsid);
-                    hrProf = profiles->ActivateLanguageProfile(
-                        GUID_TFCAT_TIP_KEYBOARD, 0x0804, clsid);
-                    BridgeLog(L"TextBridge: ActivateLanguageProfile(MS Pinyin) hr=%x\n",
-                              hrProf);
-                }
-                profiles->Release();
-            }
-        }
-
-        // 按键路由管理器：把 RAIL 窗口的按键消息喂给 TSF（IME 组合的
-        // 前提——没有它按键直达应用，IME 收不到键、永远不组合）。
-        hr = tm->QueryInterface(IID_ITfKeystrokeMgr,
-                                reinterpret_cast<void**>(&g_keystrokeMgr));
-        BridgeLog(L"TextBridge: keystroke mgr hr=%x\n", hr);
-
-        // 打开键盘 compartment（IME 按键处理的前提——新激活的线程
-        // 默认关闭；关闭时 IME 不消费任何按键）。
-        ITfCompartmentMgr* cm = nullptr;
-        hr = tm->QueryInterface(IID_ITfCompartmentMgr,
-                                reinterpret_cast<void**>(&cm));
-        if (SUCCEEDED(hr) && cm)
-        {
-            ITfCompartment* pOpen = nullptr;
-            hr = cm->GetCompartment(GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
-                                    &pOpen);
-            if (SUCCEEDED(hr) && pOpen)
-            {
-                VARIANT v;
-                VariantInit(&v);
-                v.vt = VT_I4;
-                v.lVal = 1;   // keyboard open
-                hr = pOpen->SetValue(clientId, &v);
-                BridgeLog(L"TextBridge: keyboard open hr=%x\n", hr);
-                pOpen->Release();
-            }
-            // IME 转换模式：native（中文）
-            ITfCompartment* pConv = nullptr;
-            hr = cm->GetCompartment(GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION,
-                                    &pConv);
-            if (SUCCEEDED(hr) && pConv)
-            {
-                VARIANT v2;
-                VariantInit(&v2);
-                v2.vt = VT_I4;
-                v2.lVal = 1;   // native（中文）
-                pConv->SetValue(clientId, &v2);
-                pConv->Release();
-            }
-            cm->Release();
-        }
 
         // 保持 TSF 对象存活；WM_SETFOCUS 时重绑文档焦点。
         g_threadMgr = tm;
@@ -973,10 +831,6 @@ namespace
             return;
         lastPoll = now;
 
-        // sink 已挂接时由 OnEndEdit 驱动，轮询停用（避免双发）
-        if (g_sinkAdvised)
-            return;
-
         if (!g_context || !g_clientId)
             return;
 
@@ -986,35 +840,20 @@ namespace
             g_clientId, sess, TF_ES_READ | TF_ES_SYNC, &hrSession);
         if (SUCCEEDED(hr) && SUCCEEDED(hrSession))
         {
-            // 捕获 IME 写入存储的文本：选字确认时 IME 用最终中文覆写
-            // 组合区间（写入文本存储），提交时应使用它而非拼音缓存。
-            if (g_textStore && !g_textStore->inserted.empty())
-                g_pendingCommitText = g_textStore->inserted;
-
             if (sess->hasComposition)
             {
                 g_lastCompositionText = sess->text;
                 SendComposition(sess->text, 2);   // UPDATE preedit
                 BridgeLog(L"TextBridge: poll preedit len=%u",
                           (UINT32)sess->text.size());
-                g_pendingCommitText.clear();   // 组合仍活跃，提交文本未定
             }
-            else if (!g_lastCompositionText.empty() ||
-                     !g_pendingCommitText.empty())
+            else if (!g_lastCompositionText.empty())
             {
-                // 组合结束（选字确认）：提交 IME 写入存储的最终中文；
-                // 存储无写入时退回拼音缓存。提交后清空存储保证下次
-                // 组合从干净状态开始。
-                const std::wstring& commit = !g_pendingCommitText.empty()
-                    ? g_pendingCommitText : g_lastCompositionText;
                 BridgeLog(L"TextBridge: poll commit len=%u",
-                          (UINT32)commit.size());
-                SendUpdateText(commit);
+                          (UINT32)g_lastCompositionText.size());
+                SendUpdateText(g_lastCompositionText);
                 SendComposition(L"", 3);   // LEAVE 清 preedit
                 g_lastCompositionText.clear();
-                g_pendingCommitText.clear();
-                if (g_textStore)
-                    g_textStore->Reset();
             }
         }
         sess->Release();
@@ -1045,43 +884,6 @@ namespace
                 if (g_tsfActivated)
                 {
                     PollComposition();
-                }
-                // 按键路由：把按键喂给 TSF。IME 消费（组合中/功能键）
-                // 则吞掉消息，应用收不到；未消费则放行（普通字符键）。
-                if (g_keystrokeMgr && g_tsfActivated &&
-                    (msg->message == WM_KEYDOWN ||
-                     msg->message == WM_SYSKEYDOWN))
-                {
-                    BOOL eaten = FALSE;
-                    HRESULT hrKey = g_keystrokeMgr->KeyDown(msg->wParam,
-                                                            msg->lParam,
-                                                            &eaten);
-                    BridgeLog(L"TextBridge: KeyDown vk=%x hr=%x eaten=%d\n",
-                              (UINT32)msg->wParam, (UINT32)hrKey,
-                              eaten ? 1 : 0);
-                    if (SUCCEEDED(hrKey) && eaten)
-                    {
-                        BridgeLog(L"TextBridge: key eaten vk=%x\n",
-                                  (UINT32)msg->wParam);
-                        msg->message = WM_NULL;
-                        msg->wParam = 0;
-                        msg->lParam = 0;
-                    }
-                }
-                else if (g_keystrokeMgr && g_tsfActivated &&
-                         (msg->message == WM_KEYUP ||
-                          msg->message == WM_SYSKEYUP))
-                {
-                    BOOL eaten = FALSE;
-                    HRESULT hrKey = g_keystrokeMgr->KeyUp(msg->wParam,
-                                                          msg->lParam,
-                                                          &eaten);
-                    if (SUCCEEDED(hrKey) && eaten)
-                    {
-                        msg->message = WM_NULL;
-                        msg->wParam = 0;
-                        msg->lParam = 0;
-                    }
                 }
             }
         }
@@ -1185,25 +987,33 @@ namespace
             BridgeLog(L"TextBridge: channel connected (role=%d)\n", static_cast<int>(m_role));
         }
 
-        // 只有 S2C 通道会收到 weston 的数据：完整转发给 InputService
-        // （最终组合拳：配合 rdclientax 按键拦截补丁，InputService 的
-        // 远程模式 IME 消费按键后产生的 UPDATE_COMPOSITION/UPDATE_TEXT
-        // 经本桥到达 weston；服务器侧 UPDATE_MODE 应答已实现）。
+        // 只有 S2C 通道会收到 weston 的数据。
+        // 方案 B 关键改动：S2C 一律不进 InputService（ReportDataReceived
+        // 不调用）——weston 的 NOTIFY_SERVER_VERSION (0x031A) 被吞掉，
+        // 握手不完成，InputService 会话不建立，本地 IME 不被抑制；
+        // 本地 IME 经 TSF 激活的上下文工作，组合/选字由 sink 读出后经
+        // SendComposition/SendUpdateText 直写 weston（C2S 方向）。
+        // InputService 单方面发的配置类 PDU 也不再转发。
         STDMETHODIMP
         OnDataReceived(ULONG cbSize, _In_reads_(cbSize) BYTE* pBuffer)
         {
-            if (m_role != BridgeChannelRole::ServerToClient || !g_connection)
+            if (m_role != BridgeChannelRole::ServerToClient)
                 return S_OK;
 
-            try
+            // S2C 帧无外层前缀：[size(4)][id(2)][payload]
+            if (cbSize >= 6)
             {
-                auto pdu = winrt::com_array<uint8_t>(pBuffer, pBuffer + cbSize);
-                g_connection.ReportDataReceived(pdu);
-            }
-            catch (winrt::hresult_error const& e)
-            {
-                BridgeLog(L"TextBridge: ReportDataReceived failed hr=%x %s\n",
-                          e.code(), e.message().c_str());
+                UINT16 id = (UINT16)(pBuffer[4] | ((UINT16)pBuffer[5] << 8));
+                if (id == 0x031A)
+                {
+                    BridgeLog(L"TextBridge: swallowed NOTIFY_SERVER_VERSION"
+                              L" (no InputService session by design)\n");
+                }
+                else
+                {
+                    BridgeLog(L"TextBridge: ignored S2C PDU 0x%04x (%u"
+                              L" bytes)\n", id, cbSize);
+                }
             }
             return S_OK;
         }
