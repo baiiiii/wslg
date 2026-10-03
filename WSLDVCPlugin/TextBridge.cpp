@@ -920,12 +920,45 @@ namespace
                     HRESULT hr = g_threadMgr->SetFocus(g_docMgr);
                     BridgeLog(L"TextBridge: refocus on WM_SETFOCUS hr=%x\n", hr);
                 }
-                // 组合轮询：读活动组合 → preedit；组合消失 → 提交。
-                // 注意：不向 ITfKeystrokeMgr 喂键——实测双重投递会打乱
-                // IME 按键状态（01:40 无喂键时多轮组合正常）。
+                // 组合轮询：读活动组合 → preedit；组合消失 → 提交
                 if (g_tsfActivated)
                 {
                     PollComposition();
+                }
+                // 按键路由（官方文档模式）：把按键喂给 TSF 的
+                // ITfKeystrokeMgr。IME 消费（组合中/功能键）则吞掉消息，
+                // 应用收不到；未消费则放行。
+                if (g_keystrokeMgr && g_tsfActivated &&
+                    (msg->message == WM_KEYDOWN ||
+                     msg->message == WM_SYSKEYDOWN))
+                {
+                    BOOL eaten = FALSE;
+                    HRESULT hrKey = g_keystrokeMgr->KeyDown(msg->wParam,
+                                                            msg->lParam,
+                                                            &eaten);
+                    if (SUCCEEDED(hrKey) && eaten)
+                    {
+                        BridgeLog(L"TextBridge: key eaten vk=%x\n",
+                                  (UINT32)msg->wParam);
+                        msg->message = WM_NULL;
+                        msg->wParam = 0;
+                        msg->lParam = 0;
+                    }
+                }
+                else if (g_keystrokeMgr && g_tsfActivated &&
+                         (msg->message == WM_KEYUP ||
+                          msg->message == WM_SYSKEYUP))
+                {
+                    BOOL eaten = FALSE;
+                    HRESULT hrKey = g_keystrokeMgr->KeyUp(msg->wParam,
+                                                          msg->lParam,
+                                                          &eaten);
+                    if (SUCCEEDED(hrKey) && eaten)
+                    {
+                        msg->message = WM_NULL;
+                        msg->wParam = 0;
+                        msg->lParam = 0;
+                    }
                 }
             }
         }
