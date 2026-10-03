@@ -418,6 +418,27 @@ namespace
             return S_OK;
         }
 
+        STDMETHODIMP GetEmbedded(LONG acpPos, const GUID& rguidService,
+                                 const IID& riid, IUnknown** ppunk) override
+        { (void)acpPos; (void)rguidService; (void)riid; (void)ppunk;
+          return E_NOTIMPL; }
+
+        STDMETHODIMP RetrieveRequestedAttrs(ULONG ulCount,
+                                            TS_ATTRVAL* paAttrVal,
+                                            ULONG* pcFetched) override
+        {
+            if (pcFetched) *pcFetched = 0;
+            (void)ulCount; (void)paAttrVal;
+            return S_OK;
+        }
+
+        void Reset()
+        {
+            text.clear();
+            selStart = selEnd = 0;
+            inserted.clear();
+        }
+
         // 屏幕几何：IME 用 GetTextExt/GetScreenExt 定位候选窗。返回
         // RAIL 窗口的屏幕矩形（组合字符串位近似）。
         static RECT RailWindowRect()
