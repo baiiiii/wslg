@@ -237,26 +237,65 @@ namespace
             return r;
         }
 
-        // ITfTextEditSink：每次编辑会话结束后调用；读活动组合文本
-        // 作为 preedit 发给 weston，并缓存供组合结束时提交。
+        // ITfTextEditSink：每次编辑会话结束后调用（IME 的组合/提交
+        // 都通过编辑会话写入本上下文）。组合生命周期 sink 无法挂接
+        // （CONNECT_E_CANNOTCONNECT），因此这里自足式处理：枚举上下文
+        // 活动组合——存在则发 preedit（UPDATE_COMPOSITION）；消失则把
+        // 最后组合文本作为提交发出（UPDATE_TEXT）并清 preedit。
         STDMETHODIMP OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly,
                                ITfEditRecord* pEditRecord) override
         {
-            (void)pic; (void)pEditRecord;
-            if (g_activeCompositionView)
+            (void)pEditRecord;
+            ITfContextComposition* cc = nullptr;
+            HRESULT hr = pic->QueryInterface(IID_ITfContextComposition,
+                                             reinterpret_cast<void**>(&cc));
+            if (FAILED(hr) || !cc)
+                return S_OK;
+
+            IEnumITfCompositionView* en = nullptr;
+            hr = cc->EnumCompositions(&en);
+            cc->Release();
+            if (FAILED(hr) || !en)
+                return S_OK;
+
+            BOOL hasComposition = FALSE;
+            std::wstring text;
+            ITfCompositionView* cv = nullptr;
+            ULONG fetched = 0;
+            while (en->Next(1, &cv, &fetched) == S_OK && fetched == 1)
             {
-                ITfRange* range = nullptr;
-                if (SUCCEEDED(g_activeCompositionView->GetRange(&range)) && range)
+                hasComposition = TRUE;
+                if (text.empty())
                 {
-                    wchar_t buf[1024];
-                    ULONG got = 0;
-                    if (SUCCEEDED(range->GetText(ecReadOnly, 0, buf, 1023, &got)))
+                    ITfRange* range = nullptr;
+                    if (SUCCEEDED(cv->GetRange(&range)) && range)
                     {
-                        g_lastCompositionText.assign(buf, got);
-                        SendComposition(g_lastCompositionText, 2);   // UPDATE
+                        wchar_t buf[1024];
+                        ULONG got = 0;
+                        if (SUCCEEDED(range->GetText(ecReadOnly, 0, buf,
+                                                     1023, &got)))
+                            text.assign(buf, got);
+                        range->Release();
                     }
-                    range->Release();
                 }
+                cv->Release();
+            }
+            en->Release();
+
+            if (hasComposition)
+            {
+                g_lastCompositionText = text;
+                SendComposition(text, 2);   // UPDATE preedit
+                BridgeLog(L"TextBridge: preedit len=%u\n", (UINT32)text.size());
+            }
+            else if (!g_lastCompositionText.empty())
+            {
+                // 组合结束（选字确认）：提交最终文本
+                BridgeLog(L"TextBridge: commit len=%u\n",
+                          (UINT32)g_lastCompositionText.size());
+                SendUpdateText(g_lastCompositionText);
+                SendComposition(L"", 3);   // LEAVE 清 preedit
+                g_lastCompositionText.clear();
             }
             return S_OK;
         }
