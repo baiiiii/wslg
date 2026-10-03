@@ -62,6 +62,7 @@ namespace
     TfClientId g_clientId = 0;
     ITfThreadMgr* g_threadMgr = nullptr;
     ITfDocumentMgr* g_docMgr = nullptr;
+    ITfKeystrokeMgr* g_keystrokeMgr = nullptr;   // 按键路由（IME 收键的通道）
     HWND g_railHwnd = nullptr;
     HHOOK g_tsfHook = nullptr;
     bool g_tsfActivated = false;
@@ -744,6 +745,47 @@ namespace
         }
         BridgeLog(L"TextBridge: Push/SetFocus(doc) hr=%x\n", hr);
 
+        // 按键路由管理器：把 RAIL 窗口的按键消息喂给 TSF（IME 组合的
+        // 前提——没有它按键直达应用，IME 收不到键、永远不组合）。
+        hr = tm->QueryInterface(IID_ITfKeystrokeMgr,
+                                reinterpret_cast<void**>(&g_keystrokeMgr));
+        BridgeLog(L"TextBridge: keystroke mgr hr=%x\n", hr);
+
+        // 打开键盘 compartment（IME 按键处理的前提——新激活的线程
+        // 默认关闭；关闭时 IME 不消费任何按键）+ 中文转换模式。
+        ITfCompartmentMgr* cm = nullptr;
+        hr = tm->QueryInterface(IID_ITfCompartmentMgr,
+                                reinterpret_cast<void**>(&cm));
+        if (SUCCEEDED(hr) && cm)
+        {
+            ITfCompartment* pOpen = nullptr;
+            hr = cm->GetCompartment(GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
+                                    &pOpen);
+            if (SUCCEEDED(hr) && pOpen)
+            {
+                VARIANT v;
+                VariantInit(&v);
+                v.vt = VT_I4;
+                v.lVal = 1;   // keyboard open
+                hr = pOpen->SetValue(clientId, &v);
+                BridgeLog(L"TextBridge: keyboard open hr=%x\n", hr);
+                pOpen->Release();
+            }
+            ITfCompartment* pConv = nullptr;
+            hr = cm->GetCompartment(GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION,
+                                    &pConv);
+            if (SUCCEEDED(hr) && pConv)
+            {
+                VARIANT v2;
+                VariantInit(&v2);
+                v2.vt = VT_I4;
+                v2.lVal = 1;   // native（中文）
+                pConv->SetValue(clientId, &v2);
+                pConv->Release();
+            }
+            cm->Release();
+        }
+
         // 保持 TSF 对象存活；WM_SETFOCUS 时重绑文档焦点。
         g_threadMgr = tm;
         g_docMgr = doc;
@@ -883,6 +925,40 @@ namespace
                 {
                     PollComposition();
                 }
+                // 按键路由：把按键喂给 TSF。IME 消费（组合中/功能键）
+                // 则吞掉消息，应用收不到；未消费则放行（普通字符键）。
+                if (g_keystrokeMgr && g_tsfActivated &&
+                    (msg->message == WM_KEYDOWN ||
+                     msg->message == WM_SYSKEYDOWN))
+                {
+                    BOOL eaten = FALSE;
+                    HRESULT hrKey = g_keystrokeMgr->KeyDown(msg->wParam,
+                                                            msg->lParam,
+                                                            &eaten);
+                    if (SUCCEEDED(hrKey) && eaten)
+                    {
+                        BridgeLog(L"TextBridge: key eaten vk=%x\n",
+                                  (UINT32)msg->wParam);
+                        msg->message = WM_NULL;
+                        msg->wParam = 0;
+                        msg->lParam = 0;
+                    }
+                }
+                else if (g_keystrokeMgr && g_tsfActivated &&
+                         (msg->message == WM_KEYUP ||
+                          msg->message == WM_SYSKEYUP))
+                {
+                    BOOL eaten = FALSE;
+                    HRESULT hrKey = g_keystrokeMgr->KeyUp(msg->wParam,
+                                                          msg->lParam,
+                                                          &eaten);
+                    if (SUCCEEDED(hrKey) && eaten)
+                    {
+                        msg->message = WM_NULL;
+                        msg->wParam = 0;
+                        msg->lParam = 0;
+                    }
+                }
             }
         }
         return CallNextHookEx(nullptr, code, wParam, lParam);
@@ -952,10 +1028,24 @@ namespace
             {
                 EnumContext ctx{ pid, {}, iteration < 2 };
                 EnumWindows(CollectRemoteUiThread, reinterpret_cast<LPARAM>(&ctx));
-                // RegisterThread 已禁用：实测线程注册后 InputService
-                // 会把该线程标记为远程 UI 线程并抑制本地 IME（等待永不
-                // 到来的远程组合驱动），候选窗消失。出候选依赖的是
-                // 本地 TSF 激活（RAIL_WINDOW 钩子），注册反而有害。
+                // 官方文档：注册呈现远程 UI 的线程——已注册线程成为
+                // 前台时，内置输入法与该线程注册的连接通信。
+                for (DWORD tid : ctx.tids)
+                {
+                    if (g_registeredThreads.insert(tid).second)
+                    {
+                        try
+                        {
+                            g_connection.RegisterThread(tid);
+                            BridgeLog(L"TextBridge: RegisterThread(%u)\n", tid);
+                        }
+                        catch (winrt::hresult_error const& e)
+                        {
+                            BridgeLog(L"TextBridge: RegisterThread(%u) failed hr=%x\n",
+                                      tid, e.code());
+                        }
+                    }
+                }
                 ++iteration;
             }
             for (int i = 0; i < 30 && !g_watchdogStop; ++i)
@@ -985,33 +1075,24 @@ namespace
             BridgeLog(L"TextBridge: channel connected (role=%d)\n", static_cast<int>(m_role));
         }
 
-        // 只有 S2C 通道会收到 weston 的数据。
-        // 方案 B 关键改动：S2C 一律不进 InputService（ReportDataReceived
-        // 不调用）——weston 的 NOTIFY_SERVER_VERSION (0x031A) 被吞掉，
-        // 握手不完成，InputService 会话不建立，本地 IME 不被抑制；
-        // 本地 IME 经 TSF 激活的上下文工作，组合/选字由 sink 读出后经
-        // SendComposition/SendUpdateText 直写 weston（C2S 方向）。
-        // InputService 单方面发的配置类 PDU 也不再转发。
+        // 只有 S2C 通道会收到 weston 的数据：完整转发给 InputService
+        // （远程模式：InputService 的 IME 消费按键后产生的
+        // UPDATE_COMPOSITION/UPDATE_TEXT 经本桥到达 weston）。
         STDMETHODIMP
         OnDataReceived(ULONG cbSize, _In_reads_(cbSize) BYTE* pBuffer)
         {
-            if (m_role != BridgeChannelRole::ServerToClient)
+            if (m_role != BridgeChannelRole::ServerToClient || !g_connection)
                 return S_OK;
 
-            // S2C 帧无外层前缀：[size(4)][id(2)][payload]
-            if (cbSize >= 6)
+            try
             {
-                UINT16 id = (UINT16)(pBuffer[4] | ((UINT16)pBuffer[5] << 8));
-                if (id == 0x031A)
-                {
-                    BridgeLog(L"TextBridge: swallowed NOTIFY_SERVER_VERSION"
-                              L" (no InputService session by design)\n");
-                }
-                else
-                {
-                    BridgeLog(L"TextBridge: ignored S2C PDU 0x%04x (%u"
-                              L" bytes)\n", id, cbSize);
-                }
+                auto pdu = winrt::com_array<uint8_t>(pBuffer, pBuffer + cbSize);
+                g_connection.ReportDataReceived(pdu);
+            }
+            catch (winrt::hresult_error const& e)
+            {
+                BridgeLog(L"TextBridge: ReportDataReceived failed hr=%x %s\n",
+                          e.code(), e.message().c_str());
             }
             return S_OK;
         }
