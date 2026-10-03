@@ -397,7 +397,77 @@ namespace
             (void)dwFlags; (void)cFilterAttrs; (void)paAttrFilter;
             return S_OK;
         }
+
+        // 屏幕几何：IME 用 GetTextExt/GetScreenExt 定位候选窗。返回
+        // RAIL 窗口的屏幕矩形（组合字符串位近似）。
+        static RECT RailWindowRect()
+        {
+            RECT rc = { 0, 0, 0, 0 };
+            if (g_railHwnd)
+                GetWindowRect(g_railHwnd, &rc);
+            return rc;
+        }
+
+        STDMETHODIMP GetACPFromPoint(TsViewCookie vcView, const POINT* ptScreen,
+                                     DWORD dwFlags, LONG* pacp) override
+        {
+            (void)vcView; (void)ptScreen; (void)dwFlags;
+            if (pacp) *pacp = (LONG)text.size();
+            return S_OK;
+        }
+
+        STDMETHODIMP GetActiveView(TsViewCookie* pvcView) override
+        {
+            if (pvcView) *pvcView = 0;
+            return S_OK;
+        }
+
+        STDMETHODIMP GetEndACP(LONG* pacp) override
+        {
+            if (pacp) *pacp = (LONG)text.size();
+            return S_OK;
+        }
+
+        STDMETHODIMP GetFormattedText(LONG acpStart, LONG acpEnd,
+                                      IDataObject** ppDataObject) override
+        { (void)acpStart; (void)acpEnd; (void)ppDataObject; return E_NOTIMPL; }
+
+        STDMETHODIMP GetScreenExt(TsViewCookie vcView, RECT* prc) override
+        {
+            (void)vcView;
+            if (!prc) return E_INVALIDARG;
+            *prc = RailWindowRect();
+            return S_OK;
+        }
+
+        STDMETHODIMP GetTextExt(TsViewCookie vcView, LONG acpStart,
+                                LONG acpEnd, RECT* prc, BOOL* pfClipped) override
+        {
+            (void)vcView; (void)acpStart; (void)acpEnd;
+            if (!prc || !pfClipped) return E_INVALIDARG;
+            *prc = RailWindowRect();
+            *pfClipped = FALSE;
+            return S_OK;
+        }
+
+        STDMETHODIMP GetWnd(TsViewCookie vcView, HWND* phwnd) override
+        {
+            (void)vcView;
+            if (phwnd) *phwnd = g_railHwnd;
+            return S_OK;
+        }
+
+        STDMETHODIMP QueryInsertEmbedded(const GUID* pguidService,
+                                         const FORMATETC* pFormatEtc,
+                                         BOOL* pfInsertable) override
+        {
+            (void)pguidService; (void)pFormatEtc;
+            if (pfInsertable) *pfInsertable = FALSE;
+            return S_OK;
+        }
     };
+
+    BridgeTextStore* g_textStore = nullptr;   // 全局存储（传给 CreateContext）
 
     // TSF 事件 sink：手写 IUnknown（官方 TSF 示例的标准做法；
     // winrt::implements 对经典 COM 接口的 QI 不被 AdviseSink 接受，
