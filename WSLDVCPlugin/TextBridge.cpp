@@ -979,6 +979,9 @@ namespace
                     HRESULT hrKey = g_keystrokeMgr->KeyDown(msg->wParam,
                                                             msg->lParam,
                                                             &eaten);
+                    BridgeLog(L"TextBridge: KeyDown vk=%x hr=%x eaten=%d\n",
+                              (UINT32)msg->wParam, (UINT32)hrKey,
+                              eaten ? 1 : 0);
                     if (SUCCEEDED(hrKey) && eaten)
                     {
                         BridgeLog(L"TextBridge: key eaten vk=%x\n",
