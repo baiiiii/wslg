@@ -200,16 +200,49 @@ namespace
     // TSF 事件桥：IME 组合/确认文本写入激活的上下文，桥读取后转为 PDU。
     // （签名按 msctf.h 实际定义）
     // ------------------------------------------------------------------
-    struct BridgeTsfSink :
-        winrt::implements<BridgeTsfSink, ITfTextEditSink, ITfContextOwnerCompositionSink>
+    // TSF 事件 sink：手写 IUnknown（官方 TSF 示例的标准做法；
+    // winrt::implements 对经典 COM 接口的 QI 不被 AdviseSink 接受，
+    // 返回 CONNECT_E_CANNOTCONNECT）。
+    class BridgeTsfSink final :
+        public ITfTextEditSink,
+        public ITfContextOwnerCompositionSink
     {
-        // ITfTextEditSink：每次编辑提交后调用；读活动组合文本作为
-        // preedit 发给 weston。
-        STDMETHODIMP
-        OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, ITfEditRecord* pEditRecord)
+        LONG m_ref = 1;
+
+    public:
+        STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
         {
-            UNREFERENCED_PARAMETER(pic);
-            UNREFERENCED_PARAMETER(pEditRecord);
+            if (!ppv) return E_POINTER;
+            if (riid == IID_IUnknown || riid == IID_ITfTextEditSink)
+            {
+                *ppv = static_cast<ITfTextEditSink*>(this);
+            }
+            else if (riid == IID_ITfContextOwnerCompositionSink)
+            {
+                *ppv = static_cast<ITfContextOwnerCompositionSink*>(this);
+            }
+            else
+            {
+                *ppv = nullptr;
+                return E_NOINTERFACE;
+            }
+            AddRef();
+            return S_OK;
+        }
+        STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&m_ref); }
+        STDMETHODIMP_(ULONG) Release() override
+        {
+            ULONG r = InterlockedDecrement(&m_ref);
+            if (r == 0) delete this;
+            return r;
+        }
+
+        // ITfTextEditSink：每次编辑会话结束后调用；读活动组合文本
+        // 作为 preedit 发给 weston，并缓存供组合结束时提交。
+        STDMETHODIMP OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly,
+                               ITfEditRecord* pEditRecord) override
+        {
+            (void)pic; (void)pEditRecord;
             if (g_activeCompositionView)
             {
                 ITfRange* range = nullptr;
@@ -229,8 +262,8 @@ namespace
         }
 
         // ITfContextOwnerCompositionSink：组合生命周期。
-        STDMETHODIMP
-        OnStartComposition(ITfCompositionView* pComposition, BOOL* pfAccepted)
+        STDMETHODIMP OnStartComposition(ITfCompositionView* pComposition,
+                                        BOOL* pfAccepted) override
         {
             g_activeCompositionView.copy_from(pComposition);
             BridgeLog(L"TextBridge: composition started");
@@ -238,28 +271,22 @@ namespace
             return S_OK;
         }
 
-        STDMETHODIMP
-        OnUpdateComposition(ITfCompositionView* pComposition, ITfRange* pRangeNew)
+        STDMETHODIMP OnUpdateComposition(ITfCompositionView* pComposition,
+                                         ITfRange* pRangeNew) override
         {
-            UNREFERENCED_PARAMETER(pComposition);
-            UNREFERENCED_PARAMETER(pRangeNew);
+            (void)pComposition; (void)pRangeNew;
             return S_OK;
         }
 
-        // 组合结束（选字确认）：用同步只读 edit session 读最终文本，
-        // 发 UPDATE_TEXT 提交 + 空 UPDATE_COMPOSITION 清 preedit。
-        STDMETHODIMP
-        OnEndComposition(ITfCompositionView* pComposition)
+        // 组合结束（选字确认）：提交 OnEndEdit 缓存的最终组合串。
+        STDMETHODIMP OnEndComposition(ITfCompositionView* pComposition) override
         {
             BridgeLog(L"TextBridge: composition ended");
-            // 提交文本用 OnEndEdit 缓存的最后组合串（组合结束时 TSF
-            // 已清空范围，无法再读）。 weston 收到 UPDATE_TEXT 后按
-            // 光标插入，空 UPDATE_COMPOSITION(LEAVE) 清除 preedit。
             if (pComposition && !g_lastCompositionText.empty())
             {
                 BridgeLog(L"TextBridge: commit len=%u", (UINT32)g_lastCompositionText.size());
                 SendUpdateText(g_lastCompositionText);
-                SendComposition(L"", 3);
+                SendComposition(L"", 3);   // LEAVE 清 preedit
             }
             g_lastCompositionText.clear();
             g_activeCompositionView = nullptr;
