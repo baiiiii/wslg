@@ -736,8 +736,6 @@ namespace
         // （见下方），不再挂接 sink——挂接的 TextEditSink 与文本存储
         // 是"出候选配置"中没有的两个变量，属候选窗消失的嫌疑项，
         // 先全部摘除以回归已验证基线。
-        ctxSource = nullptr;
-        (void)ctxSource;
 
         hr = doc->Push(ctx);
         if (SUCCEEDED(hr))
