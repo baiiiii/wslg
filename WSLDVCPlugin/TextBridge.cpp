@@ -376,6 +376,26 @@ namespace
             return S_OK;
         }
 
+        STDMETHODIMP InsertEmbeddedAtSelection(DWORD dwFlags,
+                                               IDataObject* pDataObject,
+                                               LONG* pacpStart, LONG* pacpEnd,
+                                               TS_TEXTCHANGE* pChange) override
+        { (void)dwFlags; (void)pDataObject; if (pacpStart) *pacpStart = 0;
+          if (pacpEnd) *pacpEnd = 0; if (pChange) memset(pChange, 0, sizeof(TS_TEXTCHANGE));
+          return E_NOTIMPL; }
+
+        STDMETHODIMP RequestAttrsAtPosition(LONG acpPos, ULONG cFilterAttrs,
+                                            const TS_ATTRID* paFilterAttrs,
+                                            DWORD dwFlags) override
+        { (void)acpPos; (void)cFilterAttrs; (void)paFilterAttrs; (void)dwFlags;
+          return S_OK; }
+
+        STDMETHODIMP RequestAttrsTransitioningAtPosition(
+            LONG acpPos, ULONG cFilterAttrs, const TS_ATTRID* paFilterAttrs,
+            DWORD dwFlags) override
+        { (void)acpPos; (void)cFilterAttrs; (void)paFilterAttrs; (void)dwFlags;
+          return S_OK; }
+
         STDMETHODIMP FindNextAttrTransition(long acpStart, long acpHalt,
                                             ULONG cFilterAttrs,
                                             const TS_ATTRID* paAttrFilter,
