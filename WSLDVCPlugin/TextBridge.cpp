@@ -57,6 +57,7 @@ namespace
     ITfContext* g_context = nullptr;
     winrt::com_ptr<ITfComposition> g_activeComposition;
     winrt::com_ptr<ITfCompositionView> g_activeCompositionView;
+    std::wstring g_lastCompositionText;   // OnEndEdit 缓存的组合串（提交用）
     TfClientId g_clientId = 0;
     ITfThreadMgr* g_threadMgr = nullptr;
     ITfDocumentMgr* g_docMgr = nullptr;
@@ -211,14 +212,14 @@ namespace
             if (g_activeCompositionView)
             {
                 ITfRange* range = nullptr;
-                if (SUCCEEDED(g_activeCompositionView->GetRange(ecReadOnly, &range)) && range)
+                if (SUCCEEDED(g_activeCompositionView->GetRange(&range)) && range)
                 {
                     wchar_t buf[1024];
                     ULONG got = 0;
                     if (SUCCEEDED(range->GetText(ecReadOnly, 0, buf, 1023, &got)))
                     {
-                        std::wstring text(buf, got);
-                        SendComposition(text, 2);   // UPDATE
+                        g_lastCompositionText.assign(buf, got);
+                        SendComposition(g_lastCompositionText, 2);   // UPDATE
                     }
                     range->Release();
                 }
@@ -250,48 +251,16 @@ namespace
         OnEndComposition(ITfCompositionView* pComposition)
         {
             BridgeLog(L"TextBridge: composition ended");
-            if (g_context && g_clientId && pComposition)
+            // 提交文本用 OnEndEdit 缓存的最后组合串（组合结束时 TSF
+            // 已清空范围，无法再读）。 weston 收到 UPDATE_TEXT 后按
+            // 光标插入，空 UPDATE_COMPOSITION(LEAVE) 清除 preedit。
+            if (pComposition && !g_lastCompositionText.empty())
             {
-                struct ReadSession :
-                    winrt::implements<ReadSession, ITfEditSession>
-                {
-                    ITfCompositionView* view = nullptr;
-                    std::wstring text;
-                    STDMETHODIMP
-                    DoEditSession(TfEditCookie ec)
-                    {
-                        ITfRange* range = nullptr;
-                        HRESULT hr = view->GetRange(ec, &range);
-                        if (SUCCEEDED(hr) && range)
-                        {
-                            wchar_t buf[1024];
-                            ULONG got = 0;
-                            if (SUCCEEDED(range->GetText(ec, 0, buf, 1023, &got)))
-                            {
-                                text.assign(buf, got);
-                            }
-                            range->Release();
-                        }
-                        return S_OK;
-                    }
-                };
-
-                auto session = winrt::make<ReadSession>();
-                session->view = pComposition;
-                HRESULT hrSession = S_OK;
-                HRESULT hr = g_context->RequestEditSession(
-                    g_clientId, session.get(), TF_ES_READ | TF_ES_SYNC, &hrSession);
-                if (SUCCEEDED(hr) && SUCCEEDED(hrSession) && !session->text.empty())
-                {
-                    BridgeLog(L"TextBridge: commit len=%u", (UINT32)session->text.size());
-                    SendUpdateText(session->text);
-                    SendComposition(L"", 3);    // LEAVE：清 preedit
-                }
-                else
-                {
-                    BridgeLog(L"TextBridge: read session failed hr=%x/%x\n", hr, hrSession);
-                }
+                BridgeLog(L"TextBridge: commit len=%u", (UINT32)g_lastCompositionText.size());
+                SendUpdateText(g_lastCompositionText);
+                SendComposition(L"", 3);
             }
+            g_lastCompositionText.clear();
             g_activeCompositionView = nullptr;
             return S_OK;
         }
