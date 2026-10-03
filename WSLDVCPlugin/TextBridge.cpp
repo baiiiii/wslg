@@ -11,6 +11,7 @@
 //   2. 自定义 DVC 通道对 WSL::TextBridge::{ClientToServer,ServerToClient}
 //      （TextInput_*DVC 已被 msrdc 内置 remotetextplugin 占用）；
 //   3. RAIL 窗口线程的 RegisterThread 与 TSF 激活（msrdc 在虚拟化
+//      未启用时不为 RAIL 窗口激活 TSF，需公开 msctf API 补齐）；
 //   4. TSF 文本/组合监听：IME 写入上下文的组合串/确认文本由桥读取，
 //      转为 UPDATE_COMPOSITION（preedit）/ UPDATE_TEXT（提交）PDU。
 #include "pch.h"
@@ -22,6 +23,7 @@
 #include <set>
 #include <thread>
 #include <unknwn.h>
+#include <msctf.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.System.RemoteDesktop.Input.h>
 
@@ -52,9 +54,245 @@ namespace
     RemoteTextConnection g_connection{ nullptr };
     winrt::com_ptr<IWTSVirtualChannel> g_spC2SChannel;
     winrt::com_ptr<IWTSVirtualChannel> g_spS2CChannel;
+    ITfContext* g_context = nullptr;
+    winrt::com_ptr<ITfComposition> g_activeComposition;
+    winrt::com_ptr<ITfCompositionView> g_activeCompositionView;
+    std::wstring g_lastCompositionText;   // OnEndEdit 缓存的组合串（提交用）
+    TfClientId g_clientId = 0;
+    ITfThreadMgr* g_threadMgr = nullptr;
+    ITfDocumentMgr* g_docMgr = nullptr;
+    HWND g_railHwnd = nullptr;
+    HHOOK g_tsfHook = nullptr;
+    bool g_tsfActivated = false;
     bool g_watchdogStop = false;
     std::thread g_windowWatchdog;
     std::set<DWORD> g_registeredThreads;
+    uint32_t g_pduOpId = 0;
+
+    // ------------------------------------------------------------------
+    // C2S PDU 发送（外层长度前缀 + 6 字节头 + payload，与 C2S 通道
+    // 现有帧格式一致；weston 的 pump 会剥离外层前缀）
+    // ------------------------------------------------------------------
+    void
+    SendPdu(UINT16 pduId, const std::vector<uint8_t>& payload)
+    {
+        if (!g_spC2SChannel)
+        {
+            BridgeLog(L"TextBridge: SendPdu(0x%04x) dropped, channel not ready\n", pduId);
+            return;
+        }
+        UINT32 inner = 2 + static_cast<UINT32>(payload.size());
+        UINT32 outer = 4 + inner;
+        std::vector<uint8_t> pdu;
+        pdu.reserve(outer);
+        auto put32 = [&pdu](UINT32 v) {
+            pdu.push_back((uint8_t)(v));
+            pdu.push_back((uint8_t)(v >> 8));
+            pdu.push_back((uint8_t)(v >> 16));
+            pdu.push_back((uint8_t)(v >> 24));
+        };
+        auto put16 = [&pdu](UINT16 v) {
+            pdu.push_back((uint8_t)(v));
+            pdu.push_back((uint8_t)(v >> 8));
+        };
+        put32(outer);
+        put32(inner);
+        put16(pduId);
+        pdu.insert(pdu.end(), payload.begin(), payload.end());
+
+        HRESULT hr = g_spC2SChannel->Write(
+            static_cast<ULONG>(pdu.size()), pdu.data(), nullptr);
+        if (FAILED(hr))
+        {
+            BridgeLog(L"TextBridge: SendPdu(0x%04x) write failed hr=%x\n", pduId, hr);
+        }
+    }
+
+    // UPDATE_COMPOSITION（组合串 → weston 的 preedit），MS-RDPETXT 2.2.2.10。
+    void
+    SendComposition(const std::wstring& text, uint8_t action)
+    {
+        std::vector<uint8_t> payload;
+        auto put32 = [&payload](UINT32 v) {
+            payload.push_back((uint8_t)(v));
+            payload.push_back((uint8_t)(v >> 8));
+            payload.push_back((uint8_t)(v >> 16));
+            payload.push_back((uint8_t)(v >> 24));
+        };
+        put32(PDU_CLIENT_ID);
+        put32(PDU_CONTROL_ID);
+        put32(PDU_HOST_ID);
+        put32(++g_pduOpId);
+        payload.push_back(action);
+        put32(1);                               // clausesCount = 1
+        put32((UINT32)text.size());
+        for (wchar_t c : text)
+        {
+            payload.push_back((uint8_t)c);
+            payload.push_back((uint8_t)((uint16_t)c >> 8));
+        }
+        put32(0);                               // clause range.begin
+        put32(0);                               // clause range.end
+        BridgeLog(L"TextBridge: -> UPDATE_COMPOSITION action=%u len=%u\n",
+                  action, (UINT32)text.size());
+        SendPdu(0x0204, payload);
+    }
+
+    // UPDATE_TEXT（确认文本 → weston 的 commit），MS-RDPETXT 2.2.2.9。
+    void
+    SendUpdateText(const std::wstring& text)
+    {
+        std::vector<uint8_t> payload;
+        auto put32 = [&payload](UINT32 v) {
+            payload.push_back((uint8_t)(v));
+            payload.push_back((uint8_t)(v >> 8));
+            payload.push_back((uint8_t)(v >> 16));
+            payload.push_back((uint8_t)(v >> 24));
+        };
+        put32(PDU_CLIENT_ID);
+        put32(PDU_CONTROL_ID);
+        put32(PDU_HOST_ID);
+        put32(++g_pduOpId);
+        put32(0);                               // replaceBegin
+        put32(0);                               // replaceEnd
+        put32((UINT32)text.size());
+        for (wchar_t c : text)
+        {
+            payload.push_back((uint8_t)c);
+            payload.push_back((uint8_t)((uint16_t)c >> 8));
+        }
+        BridgeLog(L"TextBridge: -> UPDATE_TEXT len=%u\n", (UINT32)text.size());
+        SendPdu(0x0200, payload);
+    }
+
+    // 读取组合范围文本。
+    std::wstring
+    ReadCompositionText(TfEditCookie ec, ITfComposition* composition)
+    {
+        std::wstring out;
+        if (!composition)
+        {
+            return out;
+        }
+        ITfRange* range = nullptr;
+        HRESULT hr = composition->GetRange(&range);
+        if (FAILED(hr) || !range)
+        {
+            BridgeLog(L"TextBridge: composition GetRange failed hr=%x\n", hr);
+            return out;
+        }
+        wchar_t buf[1024];
+        ULONG got = 0;
+        hr = range->GetText(ec, 0, buf, 1023, &got);
+        if (SUCCEEDED(hr))
+        {
+            out.assign(buf, got);
+        }
+        else
+        {
+            BridgeLog(L"TextBridge: composition GetText failed hr=%x\n", hr);
+        }
+        range->Release();
+        return out;
+    }
+
+    // ------------------------------------------------------------------
+    // TSF 事件桥：IME 组合/确认文本写入激活的上下文，桥读取后转为 PDU。
+    // （签名按 msctf.h 实际定义）
+    // ------------------------------------------------------------------
+    // TSF 事件 sink：手写 IUnknown（官方 TSF 示例的标准做法；
+    // winrt::implements 对经典 COM 接口的 QI 不被 AdviseSink 接受，
+    // 返回 CONNECT_E_CANNOTCONNECT）。
+    class BridgeTsfSink final :
+        public ITfTextEditSink,
+        public ITfContextOwnerCompositionSink
+    {
+        LONG m_ref = 1;
+
+    public:
+        STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
+        {
+            if (!ppv) return E_POINTER;
+            if (riid == IID_IUnknown || riid == IID_ITfTextEditSink)
+            {
+                *ppv = static_cast<ITfTextEditSink*>(this);
+            }
+            else if (riid == IID_ITfContextOwnerCompositionSink)
+            {
+                *ppv = static_cast<ITfContextOwnerCompositionSink*>(this);
+            }
+            else
+            {
+                *ppv = nullptr;
+                return E_NOINTERFACE;
+            }
+            AddRef();
+            return S_OK;
+        }
+        STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&m_ref); }
+        STDMETHODIMP_(ULONG) Release() override
+        {
+            ULONG r = InterlockedDecrement(&m_ref);
+            if (r == 0) delete this;
+            return r;
+        }
+
+        // ITfTextEditSink：每次编辑会话结束后调用；读活动组合文本
+        // 作为 preedit 发给 weston，并缓存供组合结束时提交。
+        STDMETHODIMP OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly,
+                               ITfEditRecord* pEditRecord) override
+        {
+            (void)pic; (void)pEditRecord;
+            if (g_activeCompositionView)
+            {
+                ITfRange* range = nullptr;
+                if (SUCCEEDED(g_activeCompositionView->GetRange(&range)) && range)
+                {
+                    wchar_t buf[1024];
+                    ULONG got = 0;
+                    if (SUCCEEDED(range->GetText(ecReadOnly, 0, buf, 1023, &got)))
+                    {
+                        g_lastCompositionText.assign(buf, got);
+                        SendComposition(g_lastCompositionText, 2);   // UPDATE
+                    }
+                    range->Release();
+                }
+            }
+            return S_OK;
+        }
+
+        // ITfContextOwnerCompositionSink：组合生命周期。
+        STDMETHODIMP OnStartComposition(ITfCompositionView* pComposition,
+                                        BOOL* pfAccepted) override
+        {
+            g_activeCompositionView.copy_from(pComposition);
+            BridgeLog(L"TextBridge: composition started");
+            if (pfAccepted) { *pfAccepted = TRUE; }
+            return S_OK;
+        }
+
+        STDMETHODIMP OnUpdateComposition(ITfCompositionView* pComposition,
+                                         ITfRange* pRangeNew) override
+        {
+            (void)pComposition; (void)pRangeNew;
+            return S_OK;
+        }
+
+        // 组合结束（选字确认）：提交 OnEndEdit 缓存的最终组合串。
+        STDMETHODIMP OnEndComposition(ITfCompositionView* pComposition) override
+        {
+            BridgeLog(L"TextBridge: composition ended");
+            if (pComposition && !g_lastCompositionText.empty())
+            {
+                BridgeLog(L"TextBridge: commit len=%u", (UINT32)g_lastCompositionText.size());
+                SendUpdateText(g_lastCompositionText);
+                SendComposition(L"", 3);   // LEAVE 清 preedit
+            }
+            g_lastCompositionText.clear();
+            g_activeCompositionView = nullptr;
+            return S_OK;
+        }
+    };
 
     // RemoteTextConnectionDataHandler：InputService 产生的每条 C2S PDU
     // 经此回调，原样写往 weston 的 C2S 通道。返回 true 表示已消费。
@@ -62,17 +300,6 @@ namespace
     ForwardClientToServer(winrt::array_view<uint8_t const> const& pdu)
     {
         BridgeLog(L"TextBridge: pduForwarder %u bytes\n", (UINT32)pdu.size());
-        {
-            wchar_t hexbuf[200] = L"";
-            size_t n = pdu.size() < 40 ? pdu.size() : 40;
-            for (size_t i = 0; i < n; ++i)
-            {
-                wchar_t tmp[8];
-                swprintf_s(tmp, L"%02x ", pdu[i]);
-                wcscat_s(hexbuf, tmp);
-            }
-            BridgeLog(L"TextBridge: pdu hex: %s\n", hexbuf);
-        }
         if (!g_spC2SChannel)
         {
             BridgeLog(L"TextBridge: C2S channel not ready, dropping\n");
@@ -87,6 +314,118 @@ namespace
             BridgeLog(L"TextBridge: C2S channel write failed hr=%x\n", hr);
         }
         return true;
+    }
+
+    // ------------------------------------------------------------------
+    // RAIL 窗口线程的 TSF 激活（公开 msctf API）
+    // ------------------------------------------------------------------
+    void
+    ActivateTsfOnCurrentThread(HWND hwnd)
+    {
+        BridgeLog(L"TextBridge: TSF activate on thread %u, hwnd=%p\n",
+                  GetCurrentThreadId(), (void*)hwnd);
+        HRESULT hrInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+        ITfThreadMgr* tm = nullptr;
+        HRESULT hr = CoCreateInstance(CLSID_TF_ThreadMgr, nullptr, CLSCTX_INPROC_SERVER,
+                                      IID_ITfThreadMgr, reinterpret_cast<void**>(&tm));
+        if (FAILED(hr) || !tm)
+        {
+            BridgeLog(L"TextBridge: TF_ThreadMgr create failed hr=%x\n", hr);
+            return;
+        }
+
+        // 普通 GUI 模式激活（TF_TMF_CONSOLE 会走控制台路径）。
+        TfClientId clientId = 0;
+        hr = tm->Activate(&clientId);
+        if (FAILED(hr))
+        {
+            BridgeLog(L"TextBridge: TM activate failed hr=%x\n", hr);
+            tm->Release();
+            return;
+        }
+        BridgeLog(L"TextBridge: TSF activated, clientId=%u\n", clientId);
+        g_clientId = clientId;
+
+        ITfDocumentMgr* doc = nullptr;
+        ITfContext* ctx = nullptr;
+        hr = tm->CreateDocumentMgr(&doc);
+        if (FAILED(hr) || !doc)
+        {
+            BridgeLog(L"TextBridge: CreateDocumentMgr failed hr=%x\n", hr);
+            tm->Release();
+            return;
+        }
+        TfEditCookie ec = 0;
+        hr = doc->CreateContext(clientId, 0, nullptr, &ctx, &ec);
+        if (FAILED(hr) || !ctx)
+        {
+            BridgeLog(L"TextBridge: CreateContext failed hr=%x\n", hr);
+            doc->Release();
+            tm->Release();
+            return;
+        }
+        g_context = ctx;
+
+        // 监听文本变化与组合生命周期。
+        ITfSource* ctxSource = nullptr;
+        hr = ctx->QueryInterface(IID_ITfSource, reinterpret_cast<void**>(&ctxSource));
+        if (SUCCEEDED(hr) && ctxSource)
+        {
+            auto sink = winrt::make<BridgeTsfSink>();
+            auto teSink = sink.as<ITfTextEditSink>();
+            DWORD teCookie = 0;
+            HRESULT hrAdv = ctxSource->AdviseSink(IID_ITfTextEditSink,
+                                                  teSink.get(), &teCookie);
+            BridgeLog(L"TextBridge: advise TextEditSink hr=%x\n", hrAdv);
+            auto ocSink = sink.as<ITfContextOwnerCompositionSink>();
+            DWORD ocCookie = 0;
+            hrAdv = ctxSource->AdviseSink(IID_ITfContextOwnerCompositionSink,
+                                          ocSink.get(), &ocCookie);
+            BridgeLog(L"TextBridge: advise ContextOwnerCompositionSink hr=%x\n", hrAdv);
+            ctxSource->Release();
+        }
+
+        hr = doc->Push(ctx);
+        if (SUCCEEDED(hr))
+        {
+            hr = tm->SetFocus(doc);
+        }
+        BridgeLog(L"TextBridge: Push/SetFocus(doc) hr=%x\n", hr);
+
+        // 保持 TSF 对象存活；WM_SETFOCUS 时重绑文档焦点。
+        g_threadMgr = tm;
+        g_docMgr = doc;
+        if (hrInit == S_OK)
+        {
+            CoUninitialize();
+        }
+    }
+
+    LRESULT
+    CALLBACK
+    TsfHookProc(int code, WPARAM wParam, LPARAM lParam)
+    {
+        if (code >= HC_ACTION && g_railHwnd)
+        {
+            MSG* msg = reinterpret_cast<MSG*>(lParam);
+            if (msg && msg->hwnd == g_railHwnd)
+            {
+                if (!g_tsfActivated)
+                {
+                    g_tsfActivated = true;
+                    ActivateTsfOnCurrentThread(g_railHwnd);
+                }
+                // RAIL 窗口获得键盘焦点时重绑 TSF 文档焦点（msrdc 未
+                // 启用虚拟化，不会自己调 SetFocus）。
+                if (g_threadMgr && g_docMgr && msg->message == WM_SETFOCUS)
+                {
+                    HRESULT hr = g_threadMgr->SetFocus(g_docMgr);
+                    BridgeLog(L"TextBridge: refocus on WM_SETFOCUS hr=%x\n", hr);
+                }
+            }
+        }
+        return CallNextHookEx(nullptr, code, wParam, lParam);
     }
 
     // ------------------------------------------------------------------
@@ -121,6 +460,23 @@ namespace
         if (IsWindowVisible(hwnd))
         {
             ctx->tids.insert(tid);
+            // RAIL 窗口：挂一次性线程钩子执行 TSF 激活。
+            if (!g_tsfActivated && !g_tsfHook)
+            {
+                wchar_t cls[64] = L"";
+                GetClassNameW(hwnd, cls, 64);
+                if (wcscmp(cls, L"RAIL_WINDOW") == 0)
+                {
+                    g_railHwnd = hwnd;
+                    HMODULE hMod = nullptr;
+                    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                       reinterpret_cast<LPCWSTR>(&TsfHookProc), &hMod);
+                    g_tsfHook = SetWindowsHookExW(WH_GETMESSAGE, TsfHookProc, hMod, tid);
+                    BridgeLog(L"TextBridge: RAIL_WINDOW hwnd=%p tid=%u, tsf hook=%p\n",
+                              (void*)hwnd, tid, (void*)g_tsfHook);
+                }
+            }
         }
         return TRUE;
     }
