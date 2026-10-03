@@ -213,6 +213,7 @@ namespace
         public ITextStoreACP
     {
         LONG m_ref = 1;
+        ITextStoreACPSink* m_pSink = nullptr;
 
     public:
         std::wstring text;              // 文档内容
@@ -236,17 +237,32 @@ namespace
             return r;
         }
 
+        // TSF 编辑锁 sink：RequestLock 同步授权时必须调用
+        // ITextStoreACPSink::OnLockGranted 触发待决编辑会话——
+        // 此前只回 S_OK 不调回调，IME 的编辑会话永远不执行，
+        // 导致挂存储后 IME 无法组合（候选窗消失）。
         STDMETHODIMP AdviseSink(REFIID riid, IUnknown* punk, DWORD dwMask) override
-        { (void)riid; (void)punk; (void)dwMask; return S_OK; }
+        {
+            (void)riid; (void)dwMask;
+            if (!punk) return E_INVALIDARG;
+            m_pSink = nullptr;
+            HRESULT hr = punk->QueryInterface(IID_ITextStoreACPSink,
+                                              reinterpret_cast<void**>(&m_pSink));
+            return hr;
+        }
         STDMETHODIMP UnadviseSink(IUnknown* punk) override
-        { (void)punk; return S_OK; }
+        {
+            (void)punk;
+            if (m_pSink) { m_pSink->Release(); m_pSink = nullptr; }
+            return S_OK;
+        }
 
-        // 编辑锁：同步授权（TSF 管理器随后调用编辑会话的 OnLockGranted）
         STDMETHODIMP RequestLock(DWORD dwLockFlags, HRESULT* phrSession) override
         {
-            (void)dwLockFlags;
             if (!phrSession) return E_INVALIDARG;
-            *phrSession = S_OK;
+            if (!m_pSink) { *phrSession = TF_E_SYNCHRONOUS; return S_OK; }
+            // 同步授权：OnLockGranted 返回值即会话执行结果
+            *phrSession = m_pSink->OnLockGranted(dwLockFlags);
             return S_OK;
         }
 
@@ -647,6 +663,8 @@ namespace
                 SendComposition(L"", 3);   // LEAVE 清 preedit
                 g_lastCompositionText.clear();
                 g_pendingCommitText.clear();
+                if (g_textStore)
+                    g_textStore->Reset();   // 清空存储，下次组合干净开始
             }
             return S_OK;
         }
@@ -747,7 +765,7 @@ namespace
             return;
         }
         TfEditCookie ec = 0;
-        hr = doc->CreateContext(clientId, 0, nullptr, &ctx, &ec);
+        hr = doc->CreateContext(clientId, 0, g_textStore, &ctx, &ec);
         if (FAILED(hr) || !ctx)
         {
             BridgeLog(L"TextBridge: CreateContext failed hr=%x\n", hr);
