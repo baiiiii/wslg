@@ -722,7 +722,7 @@ namespace
             return;
         }
         TfEditCookie ec = 0;
-        hr = doc->CreateContext(clientId, 0, nullptr, &ctx, &ec);
+        hr = doc->CreateContext(clientId, 0, g_textStore, &ctx, &ec);
         if (FAILED(hr) || !ctx)
         {
             BridgeLog(L"TextBridge: CreateContext failed hr=%x\n", hr);
@@ -838,20 +838,35 @@ namespace
             g_clientId, sess, TF_ES_READ | TF_ES_SYNC, &hrSession);
         if (SUCCEEDED(hr) && SUCCEEDED(hrSession))
         {
+            // 捕获 IME 写入存储的文本：选字确认时 IME 用最终中文覆写
+            // 组合区间（写入文本存储），提交时应使用它而非拼音缓存。
+            if (g_textStore && !g_textStore->inserted.empty())
+                g_pendingCommitText = g_textStore->inserted;
+
             if (sess->hasComposition)
             {
                 g_lastCompositionText = sess->text;
                 SendComposition(sess->text, 2);   // UPDATE preedit
                 BridgeLog(L"TextBridge: poll preedit len=%u",
                           (UINT32)sess->text.size());
+                g_pendingCommitText.clear();   // 组合仍活跃，提交文本未定
             }
-            else if (!g_lastCompositionText.empty())
+            else if (!g_lastCompositionText.empty() ||
+                     !g_pendingCommitText.empty())
             {
+                // 组合结束（选字确认）：提交 IME 写入存储的最终中文；
+                // 存储无写入时退回拼音缓存。提交后清空存储保证下次
+                // 组合从干净状态开始。
+                const std::wstring& commit = !g_pendingCommitText.empty()
+                    ? g_pendingCommitText : g_lastCompositionText;
                 BridgeLog(L"TextBridge: poll commit len=%u",
-                          (UINT32)g_lastCompositionText.size());
-                SendUpdateText(g_lastCompositionText);
+                          (UINT32)commit.size());
+                SendUpdateText(commit);
                 SendComposition(L"", 3);   // LEAVE 清 preedit
                 g_lastCompositionText.clear();
+                g_pendingCommitText.clear();
+                if (g_textStore)
+                    g_textStore->Reset();
             }
         }
         sess->Release();
