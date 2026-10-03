@@ -293,16 +293,15 @@ namespace
             return S_OK;
         }
 
-        STDMETHODIMP GetText(long acpStart, long acpEnd, WCHAR* pchPlain,
+        STDMETHODIMP GetText(LONG acpStart, LONG acpEnd, WCHAR* pchPlain,
                              ULONG cchPlainReq, ULONG* pcchPlainRet,
                              TS_RUNINFO* prgRunInfo, ULONG cRunInfoReq,
-                             ULONG* pcRunInfoRet, long* pacpStart,
-                             long* pacpEnd) override
+                             ULONG* pcRunInfoRet, LONG* pacpNext) override
         {
             if (pcchPlainRet) *pcchPlainRet = 0;
             if (pcRunInfoRet) *pcRunInfoRet = 0;
             if (acpStart < 0) acpStart = 0;
-            long docEnd = (long)text.size();
+            LONG docEnd = (LONG)text.size();
             if (acpEnd == -1 || acpEnd > docEnd) acpEnd = docEnd;
             if (acpStart > acpEnd) acpStart = acpEnd;
 
@@ -316,12 +315,11 @@ namespace
             }
             if (cRunInfoReq && prgRunInfo && copy > 0)
             {
-                prgRunInfo[0].uType = TS_RT_PLAIN;
                 prgRunInfo[0].uCount = copy;
+                prgRunInfo[0].type = TS_RT_PLAIN;
                 if (pcRunInfoRet) *pcRunInfoRet = 1;
             }
-            if (pacpStart) *pacpStart = acpStart;
-            if (pacpEnd) *pacpEnd = acpStart + (long)copy;
+            if (pacpNext) *pacpNext = acpStart + (long)copy;
             return S_OK;
         }
 
@@ -349,15 +347,16 @@ namespace
             return S_OK;
         }
 
-        STDMETHODIMP InsertEmbedded(DWORD dwFlags, long acpStart, long acpEnd,
-                                    TS_OBJECTID acpObject,
+        STDMETHODIMP InsertEmbedded(DWORD dwFlags, LONG acpStart, LONG acpEnd,
+                                    IDataObject* pDataObject,
                                     TS_TEXTCHANGE* pChange) override
-        { (void)dwFlags; (void)acpStart; (void)acpEnd; (void)acpObject;
+        { (void)dwFlags; (void)acpStart; (void)acpEnd; (void)pDataObject;
           (void)pChange; return E_NOTIMPL; }
 
         STDMETHODIMP InsertTextAtSelection(DWORD dwFlags, const WCHAR* pchText,
-                                           ULONG cch, long* pacpStart,
-                                           long* pacpEnd) override
+                                           ULONG cch, LONG* pacpStart,
+                                           LONG* pacpEnd,
+                                           TS_TEXTCHANGE* pChange) override
         {
             (void)dwFlags;
             if (!pchText && cch > 0) return E_INVALIDARG;
@@ -368,6 +367,12 @@ namespace
             selEnd += (long)cch;
             selStart = selEnd;
             if (pacpEnd) *pacpEnd = selEnd;
+            if (pChange)
+            {
+                pChange->acpStart = selEnd - (long)cch;
+                pChange->acpOldEnd = pChange->acpStart;
+                pChange->acpNewEnd = selEnd;
+            }
             return S_OK;
         }
 
