@@ -722,7 +722,7 @@ namespace
             return;
         }
         TfEditCookie ec = 0;
-        hr = doc->CreateContext(clientId, 0, g_textStore, &ctx, &ec);
+        hr = doc->CreateContext(clientId, 0, nullptr, &ctx, &ec);
         if (FAILED(hr) || !ctx)
         {
             BridgeLog(L"TextBridge: CreateContext failed hr=%x\n", hr);
@@ -732,31 +732,12 @@ namespace
         }
         g_context = ctx;
 
-        // 监听文本变化与组合生命周期。
-        ITfSource* ctxSource = nullptr;
-        hr = ctx->QueryInterface(IID_ITfSource, reinterpret_cast<void**>(&ctxSource));
-        if (SUCCEEDED(hr) && ctxSource)
-        {
-            // 手写 QI 的 sink：AdviseSink 内部会 QI 两个 IID 并 AddRef。
-            ITfTextEditSink* teSink = new BridgeTsfSink();
-            DWORD teCookie = 0;
-            HRESULT hrAdv = ctxSource->AdviseSink(IID_ITfTextEditSink,
-                                                  teSink, &teCookie);
-            BridgeLog(L"TextBridge: advise TextEditSink hr=%x\n", hrAdv);
-            ITfContextOwnerCompositionSink* ocSink = nullptr;
-            hrAdv = teSink->QueryInterface(IID_ITfContextOwnerCompositionSink,
-                                           reinterpret_cast<void**>(&ocSink));
-            if (SUCCEEDED(hrAdv))
-            {
-                DWORD ocCookie = 0;
-                hrAdv = ctxSource->AdviseSink(IID_ITfContextOwnerCompositionSink,
-                                              ocSink, &ocCookie);
-                BridgeLog(L"TextBridge: advise ContextOwnerCompositionSink hr=%x\n", hrAdv);
-                ocSink->Release();
-            }
-            teSink->Release();   // AdviseSink 持有引用
-            ctxSource->Release();
-        }
+        // 组合文本读取改由 TsfHookProc 内的同步只读编辑会话轮询完成
+        // （见下方），不再挂接 sink——挂接的 TextEditSink 与文本存储
+        // 是"出候选配置"中没有的两个变量，属候选窗消失的嫌疑项，
+        // 先全部摘除以回归已验证基线。
+        ctxSource = nullptr;
+        (void)ctxSource;
 
         hr = doc->Push(ctx);
         if (SUCCEEDED(hr))
@@ -772,6 +753,110 @@ namespace
         {
             CoUninitialize();
         }
+    }
+
+    // 同步只读编辑会话：枚举上下文活动组合并读取文本（绕开无法
+    // 挂接的组合生命周期 sink；组合文本存在组合对象里，vacant
+    // 上下文也能读）。
+    class ReadCompSession final :
+        public ITfEditSession
+    {
+        LONG m_ref = 1;
+
+    public:
+        std::wstring text;          // 活动组合文本（无组合时为空）
+        BOOL hasComposition = FALSE;
+
+        STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
+        {
+            if (!ppv) return E_POINTER;
+            if (riid == IID_IUnknown || riid == IID_ITfEditSession)
+                *ppv = static_cast<ITfEditSession*>(this);
+            else { *ppv = nullptr; return E_NOINTERFACE; }
+            AddRef();
+            return S_OK;
+        }
+        STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&m_ref); }
+        STDMETHODIMP_(ULONG) Release() override
+        {
+            ULONG r = InterlockedDecrement(&m_ref);
+            if (r == 0) delete this;
+            return r;
+        }
+
+        STDMETHODIMP DoEditSession(TfEditCookie ec) override
+        {
+            if (!g_context) return S_OK;
+            ITfContextComposition* cc = nullptr;
+            HRESULT hr = g_context->QueryInterface(IID_ITfContextComposition,
+                                                   reinterpret_cast<void**>(&cc));
+            if (FAILED(hr) || !cc) return S_OK;
+            IEnumITfCompositionView* en = nullptr;
+            hr = cc->EnumCompositions(&en);
+            cc->Release();
+            if (FAILED(hr) || !en) return S_OK;
+            ITfCompositionView* cv = nullptr;
+            ULONG fetched = 0;
+            while (en->Next(1, &cv, &fetched) == S_OK && fetched == 1)
+            {
+                hasComposition = TRUE;
+                if (text.empty())
+                {
+                    ITfRange* range = nullptr;
+                    if (SUCCEEDED(cv->GetRange(&range)) && range)
+                    {
+                        wchar_t buf[1024];
+                        ULONG got = 0;
+                        if (SUCCEEDED(range->GetText(ec, 0, buf, 1023, &got)))
+                            text.assign(buf, got);
+                        range->Release();
+                    }
+                }
+                cv->Release();
+            }
+            en->Release();
+            return S_OK;
+        }
+    };
+
+    // 组合状态推进：同步只读会话读取活动组合——存在则发 preedit
+    // （UPDATE_COMPOSITION），消失则提交缓存文本（UPDATE_TEXT）并清
+    // preedit。在 RAIL 窗口线程上调用（同步会话要求所属线程）。
+    void
+    PollComposition()
+    {
+        static DWORD lastPoll = 0;
+        DWORD now = GetTickCount();
+        if (now - lastPoll < 120)   // 节流 ~8 次/秒
+            return;
+        lastPoll = now;
+
+        if (!g_context || !g_clientId)
+            return;
+
+        ReadCompSession* sess = new ReadCompSession();
+        HRESULT hrSession = S_OK;
+        HRESULT hr = g_context->RequestEditSession(
+            g_clientId, sess, TF_ES_READ | TF_ES_SYNC, &hrSession);
+        if (SUCCEEDED(hr) && SUCCEEDED(hrSession))
+        {
+            if (sess->hasComposition)
+            {
+                g_lastCompositionText = sess->text;
+                SendComposition(sess->text, 2);   // UPDATE preedit
+                BridgeLog(L"TextBridge: poll preedit len=%u",
+                          (UINT32)sess->text.size());
+            }
+            else if (!g_lastCompositionText.empty())
+            {
+                BridgeLog(L"TextBridge: poll commit len=%u",
+                          (UINT32)g_lastCompositionText.size());
+                SendUpdateText(g_lastCompositionText);
+                SendComposition(L"", 3);   // LEAVE 清 preedit
+                g_lastCompositionText.clear();
+            }
+        }
+        sess->Release();
     }
 
     LRESULT
@@ -794,6 +879,11 @@ namespace
                 {
                     HRESULT hr = g_threadMgr->SetFocus(g_docMgr);
                     BridgeLog(L"TextBridge: refocus on WM_SETFOCUS hr=%x\n", hr);
+                }
+                // 组合轮询：读活动组合 → preedit；组合消失 → 提交
+                if (g_tsfActivated)
+                {
+                    PollComposition();
                 }
             }
         }
