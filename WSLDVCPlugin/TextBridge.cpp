@@ -475,8 +475,7 @@ namespace
 
         STDMETHODIMP GetScreenExt(TsViewCookie vcView, RECT* prc) override
         {
-            BridgeLog(L"TextBridge: IME querying GetScreenExt
-");
+            BridgeLog(L"TextBridge: IME querying GetScreenExt\n");
             (void)vcView;
             if (!prc) return E_INVALIDARG;
             *prc = RailWindowRect();
@@ -486,8 +485,7 @@ namespace
         STDMETHODIMP GetTextExt(TsViewCookie vcView, LONG acpStart,
                                 LONG acpEnd, RECT* prc, BOOL* pfClipped) override
         {
-            BridgeLog(L"TextBridge: IME querying GetTextExt
-");
+            BridgeLog(L"TextBridge: IME querying GetTextExt\n");
             (void)vcView; (void)acpStart; (void)acpEnd;
             if (!prc || !pfClipped) return E_INVALIDARG;
             *prc = RailWindowRect();
