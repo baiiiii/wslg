@@ -62,6 +62,17 @@ namespace
     ForwardClientToServer(winrt::array_view<uint8_t const> const& pdu)
     {
         BridgeLog(L"TextBridge: pduForwarder %u bytes\n", (UINT32)pdu.size());
+        {
+            wchar_t hexbuf[200] = L"";
+            size_t n = pdu.size() < 40 ? pdu.size() : 40;
+            for (size_t i = 0; i < n; ++i)
+            {
+                wchar_t tmp[8];
+                swprintf_s(tmp, L"%02x ", pdu[i]);
+                wcscat_s(hexbuf, tmp);
+            }
+            BridgeLog(L"TextBridge: pdu hex: %s\n", hexbuf);
+        }
         if (!g_spC2SChannel)
         {
             BridgeLog(L"TextBridge: C2S channel not ready, dropping\n");
