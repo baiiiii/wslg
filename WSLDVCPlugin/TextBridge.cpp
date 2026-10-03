@@ -376,101 +376,30 @@ namespace
             return S_OK;
         }
 
-        STDMETHODIMP GetEmbedded(long acpPos, REFGUID rguidService,
-                                 REFIID riid, IUnknown** ppunk) override
-        { (void)acpPos; (void)rguidService; (void)riid; (void)ppunk;
-          return E_NOTIMPL; }
-
-        STDMETHODIMP QueryInsertEmbedded(const GUID* pguidService,
-                                         const FORMATETC* pFormatEtc,
-                                         BOOL* pfInsertable) override
-        { (void)pguidService; (void)pFormatEtc;
-          if (pfInsertable) *pfInsertable = FALSE; return S_OK; }
-
-        STDMETHODIMP GetFormattedText(long acpStart, long acpEnd,
-                                      IDataObject** ppDataObject) override
-        { (void)acpStart; (void)acpEnd; (void)ppDataObject; return E_NOTIMPL; }
-
-        STDMETHODIMP GetSupportedServices(ULONG ulCount, GUID* pguid,
-                                          ULONG* pcFetched) override
-        { (void)ulCount; (void)pguid; if (pcFetched) *pcFetched = 0;
-          return S_OK; }
-
-        STDMETHODIMP GetAppProperty(REFGUID rguidProperty, ITfRange** ppRange,
-                                    ITfPropertyProps** ppProp) override
-        { (void)rguidProperty; if (ppRange) *ppRange = nullptr;
-          if (ppProp) *ppProp = nullptr; return E_NOTIMPL; }
-
-        STDMETHODIMP GetProperty(REFGUID rguidProperty, ITfRange** ppRange,
-                                 ITfPropertyProps** ppProp) override
-        { (void)rguidProperty; if (ppRange) *ppRange = nullptr;
-          if (ppProp) *ppProp = nullptr; return E_NOTIMPL; }
-
-        STDMETHODIMP RequestPropertyTransition(REFGUID rguidProperty) override
-        { (void)rguidProperty; return E_NOTIMPL; }
-
         STDMETHODIMP FindNextAttrTransition(long acpStart, long acpHalt,
-                                            ULONG cchFilter,
+                                            ULONG cFilterAttrs,
                                             const TS_ATTRID* paAttrFilter,
-                                            DWORD dwFlags, long* pacpNext,
+                                            DWORD dwFlags, LONG* pacpNext,
                                             BOOL* pfFound,
-                                            long* plFoundOffset) override
-        { (void)acpStart; (void)acpHalt; (void)cchFilter; (void)paAttrFilter;
-          (void)dwFlags; if (pacpNext) *pacpNext = acpHalt;
-          if (pfFound) *pfFound = FALSE; if (plFoundOffset) *plFoundOffset = 0;
-          return S_OK; }
-
-        STDMETHODIMP RequestAttrsTransitioning(long acpPos) override
-        { (void)acpPos; return S_OK; }
+                                            LONG* plFoundOffset) override
+        {
+            (void)acpStart; (void)acpHalt; (void)cFilterAttrs;
+            (void)paAttrFilter; (void)dwFlags;
+            if (pacpNext) *pacpNext = acpHalt;
+            if (pfFound) *pfFound = FALSE;
+            if (plFoundOffset) *plFoundOffset = 0;
+            return S_OK;
+        }
 
         STDMETHODIMP RequestSupportedAttrs(DWORD dwFlags, ULONG cFilterAttrs,
                                            const TS_ATTRID* paAttrFilter) override
-        { (void)dwFlags; (void)cFilterAttrs; (void)paAttrFilter; return S_OK; }
-
-        STDMETHODIMP GetEnd(long* pacpEnd) override
-        { if (!pacpEnd) return E_INVALIDARG; *pacpEnd = (long)text.size();
-          return S_OK; }
-
-        void Reset()
         {
-            text.clear();
-            selStart = selEnd = 0;
-            inserted.clear();
+            (void)dwFlags; (void)cFilterAttrs; (void)paAttrFilter;
+            return S_OK;
         }
     };
 
-    BridgeTextStore* g_textStore = nullptr;   // 全局存储（传给 CreateContext）
-
-    // TSF 事件 sink：手写 IUnknown（官方 TSF 示例的标准做法；
-    // winrt::implements 对经典 COM 接口的 QI 不被 AdviseSink 接受，
-    // 返回 CONNECT_E_CANNOTCONNECT）。
-    class BridgeTsfSink final :
-        public ITfTextEditSink,
-        public ITfContextOwnerCompositionSink
-    {
-        LONG m_ref = 1;
-
-    public:
-        STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
-        {
-            if (!ppv) return E_POINTER;
-            if (riid == IID_IUnknown || riid == IID_ITfTextEditSink)
-            {
-                *ppv = static_cast<ITfTextEditSink*>(this);
-            }
-            else if (riid == IID_ITfContextOwnerCompositionSink)
-            {
-                *ppv = static_cast<ITfContextOwnerCompositionSink*>(this);
-            }
-            else
-            {
-                *ppv = nullptr;
-                return E_NOINTERFACE;
-            }
-            AddRef();
-            return S_OK;
-        }
-        STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&m_ref); }
+                STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&m_ref); }
         STDMETHODIMP_(ULONG) Release() override
         {
             ULONG r = InterlockedDecrement(&m_ref);
