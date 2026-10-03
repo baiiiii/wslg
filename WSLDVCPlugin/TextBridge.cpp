@@ -194,51 +194,107 @@ namespace
     }
 
     // ------------------------------------------------------------------
-    // TSF 事件桥：IME 组合/确认文本写入激活的上下文，读取后转为 PDU。
+    // TSF 事件桥：IME 组合/确认文本写入激活的上下文，桥读取后转为 PDU。
+    // （签名按 msctf.h 实际定义）
     // ------------------------------------------------------------------
     struct BridgeTsfSink :
         winrt::implements<BridgeTsfSink, ITfTextEditSink, ITfContextOwnerCompositionSink>
     {
+        // ITfTextEditSink：每次编辑提交后调用；读活动组合文本作为
+        // preedit 发给 weston。
         STDMETHODIMP
-        OnTextChange(TfEditCookie ec, ITfRange* pChange)
+        OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly, ITfEditRecord* pEditRecord)
         {
-            UNREFERENCED_PARAMETER(pChange);
-            if (g_activeComposition)
+            UNREFERENCED_PARAMETER(pic);
+            if (g_activeCompositionView)
             {
-                auto text = ReadCompositionText(ec, g_activeComposition.get());
-                SendComposition(text, 2);   // UPDATE
+                ITfRange* range = nullptr;
+                if (SUCCEEDED(g_activeCompositionView->GetRange(ecReadOnly, &range)) && range)
+                {
+                    wchar_t buf[1024];
+                    ULONG got = 0;
+                    if (SUCCEEDED(range->GetText(ecReadOnly, 0, buf, 1023, &got)))
+                    {
+                        std::wstring text(buf, got);
+                        SendComposition(text, 2);   // UPDATE
+                    }
+                    range->Release();
+                }
             }
             return S_OK;
         }
 
+        // ITfContextOwnerCompositionSink：组合生命周期。
         STDMETHODIMP
-        OnStartComposition(TfEditCookie ecWrite, ITfComposition** ppComposition)
+        OnStartComposition(ITfCompositionView* pComposition, BOOL* pfAccepted)
         {
-            UNREFERENCED_PARAMETER(ecWrite);
-            if (ppComposition) { *ppComposition = nullptr; }
-            BridgeLog(L"TextBridge: composition started\n");
+            g_activeCompositionView.copy_from(pComposition);
+            BridgeLog(L"TextBridge: composition started
+");
+            if (pfAccepted) { *pfAccepted = TRUE; }
             return S_OK;
         }
 
         STDMETHODIMP
-        OnUpdateComposition(TfEditCookie ecWrite, ITfComposition* pComposition)
+        OnUpdateComposition(ITfCompositionView* pComposition, ITfRange* pRangeNew)
         {
-            UNREFERENCED_PARAMETER(ecWrite);
             UNREFERENCED_PARAMETER(pComposition);
+            UNREFERENCED_PARAMETER(pRangeNew);
             return S_OK;
         }
 
+        // 组合结束（选字确认）：用同步只读 edit session 读最终文本，
+        // 发 UPDATE_TEXT 提交 + 空 UPDATE_COMPOSITION 清 preedit。
         STDMETHODIMP
-        OnEndComposition(TfEditCookie ecWrite, ITfComposition* pComposition)
+        OnEndComposition(ITfCompositionView* pComposition)
         {
-            auto text = ReadCompositionText(ecWrite, pComposition);
-            BridgeLog(L"TextBridge: composition ended len=%u\n", (UINT32)text.size());
-            if (!text.empty())
+            BridgeLog(L"TextBridge: composition ended
+");
+            if (g_context && g_clientId && pComposition)
             {
-                SendUpdateText(text);
+                struct ReadSession :
+                    winrt::implements<ReadSession, ITfEditSession>
+                {
+                    ITfCompositionView* view = nullptr;
+                    std::wstring text;
+                    STDMETHODIMP
+                    DoEditSession(TfEditCookie ec)
+                    {
+                        ITfRange* range = nullptr;
+                        HRESULT hr = view->GetRange(ec, &range);
+                        if (SUCCEEDED(hr) && range)
+                        {
+                            wchar_t buf[1024];
+                            ULONG got = 0;
+                            if (SUCCEEDED(range->GetText(ec, 0, buf, 1023, &got)))
+                            {
+                                text.assign(buf, got);
+                            }
+                            range->Release();
+                        }
+                        return S_OK;
+                    }
+                };
+
+                auto session = winrt::make<ReadSession>();
+                session->view = pComposition;
+                HRESULT hrSession = S_OK;
+                HRESULT hr = g_context->RequestEditSession(
+                    g_clientId, session.get(), TF_ES_READ | TF_ES_SYNC, &hrSession);
+                if (SUCCEEDED(hr) && SUCCEEDED(hrSession) && !session->text.empty())
+                {
+                    BridgeLog(L"TextBridge: commit len=%u
+", (UINT32)session->text.size());
+                    SendUpdateText(session->text);
+                    SendComposition(L"", 3);    // LEAVE：清 preedit
+                }
+                else
+                {
+                    BridgeLog(L"TextBridge: read session failed hr=%x/%x
+", hr, hrSession);
+                }
             }
-            SendComposition(L"", 3);        // LEAVE：清 weston 的 preedit
-            g_activeComposition = nullptr;
+            g_activeCompositionView = nullptr;
             return S_OK;
         }
     };
