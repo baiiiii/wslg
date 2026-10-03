@@ -1185,33 +1185,25 @@ namespace
             BridgeLog(L"TextBridge: channel connected (role=%d)\n", static_cast<int>(m_role));
         }
 
-        // 只有 S2C 通道会收到 weston 的数据。
-        // 方案 B 关键改动：S2C 一律不进 InputService（ReportDataReceived
-        // 不调用）——weston 的 NOTIFY_SERVER_VERSION (0x031A) 被吞掉，
-        // 握手不完成，InputService 会话不建立，本地 IME 不被抑制；
-        // 本地 IME 经 TSF 激活的上下文工作，组合/选字由 sink 读出后经
-        // SendComposition/SendUpdateText 直写 weston（C2S 方向）。
-        // InputService 单方面发的配置类 PDU 也不再转发。
+        // 只有 S2C 通道会收到 weston 的数据：完整转发给 InputService
+        // （最终组合拳：配合 rdclientax 按键拦截补丁，InputService 的
+        // 远程模式 IME 消费按键后产生的 UPDATE_COMPOSITION/UPDATE_TEXT
+        // 经本桥到达 weston；服务器侧 UPDATE_MODE 应答已实现）。
         STDMETHODIMP
         OnDataReceived(ULONG cbSize, _In_reads_(cbSize) BYTE* pBuffer)
         {
-            if (m_role != BridgeChannelRole::ServerToClient)
+            if (m_role != BridgeChannelRole::ServerToClient || !g_connection)
                 return S_OK;
 
-            // S2C 帧无外层前缀：[size(4)][id(2)][payload]
-            if (cbSize >= 6)
+            try
             {
-                UINT16 id = (UINT16)(pBuffer[4] | ((UINT16)pBuffer[5] << 8));
-                if (id == 0x031A)
-                {
-                    BridgeLog(L"TextBridge: swallowed NOTIFY_SERVER_VERSION"
-                              L" (no InputService session by design)\n");
-                }
-                else
-                {
-                    BridgeLog(L"TextBridge: ignored S2C PDU 0x%04x (%u"
-                              L" bytes)\n", id, cbSize);
-                }
+                auto pdu = winrt::com_array<uint8_t>(pBuffer, pBuffer + cbSize);
+                g_connection.ReportDataReceived(pdu);
+            }
+            catch (winrt::hresult_error const& e)
+            {
+                BridgeLog(L"TextBridge: ReportDataReceived failed hr=%x %s\n",
+                          e.code(), e.message().c_str());
             }
             return S_OK;
         }
