@@ -52,51 +52,9 @@ namespace
     RemoteTextConnection g_connection{ nullptr };
     winrt::com_ptr<IWTSVirtualChannel> g_spC2SChannel;
     winrt::com_ptr<IWTSVirtualChannel> g_spS2CChannel;
-    TfClientId g_clientId = 0;
     bool g_watchdogStop = false;
     std::thread g_windowWatchdog;
     std::set<DWORD> g_registeredThreads;
-    uint32_t g_pduOpId = 0;
-
-    // ------------------------------------------------------------------
-    // C2S PDU 发送（外层长度前缀 + 6 字节头 + payload，与 C2S 通道
-    // 现有帧格式一致；weston 的 pump 会剥离外层前缀）
-    // ------------------------------------------------------------------
-    void
-    SendPdu(UINT16 pduId, const std::vector<uint8_t>& payload)
-    {
-        if (!g_spC2SChannel)
-        {
-            BridgeLog(L"TextBridge: SendPdu(0x%04x) dropped, channel not ready\n", pduId);
-            return;
-        }
-        UINT32 inner = 2 + static_cast<UINT32>(payload.size());
-        UINT32 outer = 4 + inner;
-        std::vector<uint8_t> pdu;
-        pdu.reserve(outer);
-        auto put32 = [&pdu](UINT32 v) {
-            pdu.push_back((uint8_t)(v));
-            pdu.push_back((uint8_t)(v >> 8));
-            pdu.push_back((uint8_t)(v >> 16));
-            pdu.push_back((uint8_t)(v >> 24));
-        };
-        auto put16 = [&pdu](UINT16 v) {
-            pdu.push_back((uint8_t)(v));
-            pdu.push_back((uint8_t)(v >> 8));
-        };
-        put32(outer);
-        put32(inner);
-        put16(pduId);
-        pdu.insert(pdu.end(), payload.begin(), payload.end());
-
-        HRESULT hr = g_spC2SChannel->Write(
-            static_cast<ULONG>(pdu.size()), pdu.data(), nullptr);
-        if (FAILED(hr))
-        {
-            BridgeLog(L"TextBridge: SendPdu(0x%04x) write failed hr=%x\n", pduId, hr);
-        }
-    }
-
     // ------------------------------------------------------------------
     // 窗口线程注册看门狗：InputService 只对已注册线程上的前台窗口做
     // IME 路由。RAIL 窗口动态创建，周期枚举并注册新线程。
@@ -129,6 +87,7 @@ namespace
         if (IsWindowVisible(hwnd))
         {
             ctx->tids.insert(tid);
+        }
         return TRUE;
     }
 
