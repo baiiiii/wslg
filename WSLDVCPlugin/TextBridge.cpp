@@ -63,6 +63,7 @@ namespace
     TfClientId g_clientId = 0;
     ITfThreadMgr* g_threadMgr = nullptr;
     ITfDocumentMgr* g_docMgr = nullptr;
+    ITfKeystrokeMgr* g_keystrokeMgr = nullptr;   // 按键路由（IME 收键的通道）
     HWND g_railHwnd = nullptr;
     HHOOK g_tsfHook = nullptr;
     bool g_tsfActivated = false;
@@ -804,6 +805,12 @@ namespace
             ctxSource->Release();
         }
 
+        // 按键路由管理器：把 RAIL 窗口的按键消息喂给 TSF（IME 组合的
+        // 前提——没有它按键直达应用，IME 收不到键、永远不组合）。
+        hr = tm->QueryInterface(IID_ITfKeystrokeMgr,
+                                reinterpret_cast<void**>(&g_keystrokeMgr));
+        BridgeLog(L"TextBridge: keystroke mgr hr=%x\n", hr);
+
         // 保持 TSF 对象存活；WM_SETFOCUS 时重绑文档焦点。
         g_threadMgr = tm;
         g_docMgr = doc;
@@ -961,6 +968,40 @@ namespace
                 if (g_tsfActivated)
                 {
                     PollComposition();
+                }
+                // 按键路由：把按键喂给 TSF。IME 消费（组合中/功能键）
+                // 则吞掉消息，应用收不到；未消费则放行（普通字符键）。
+                if (g_keystrokeMgr && g_tsfActivated &&
+                    (msg->message == WM_KEYDOWN ||
+                     msg->message == WM_SYSKEYDOWN))
+                {
+                    BOOL eaten = FALSE;
+                    HRESULT hrKey = g_keystrokeMgr->KeyDown(msg->wParam,
+                                                            msg->lParam,
+                                                            &eaten);
+                    if (SUCCEEDED(hrKey) && eaten)
+                    {
+                        BridgeLog(L"TextBridge: key eaten vk=%x\n",
+                                  (UINT32)msg->wParam);
+                        msg->message = WM_NULL;
+                        msg->wParam = 0;
+                        msg->lParam = 0;
+                    }
+                }
+                else if (g_keystrokeMgr && g_tsfActivated &&
+                         (msg->message == WM_KEYUP ||
+                          msg->message == WM_SYSKEYUP))
+                {
+                    BOOL eaten = FALSE;
+                    HRESULT hrKey = g_keystrokeMgr->KeyUp(msg->wParam,
+                                                          msg->lParam,
+                                                          &eaten);
+                    if (SUCCEEDED(hrKey) && eaten)
+                    {
+                        msg->message = WM_NULL;
+                        msg->wParam = 0;
+                        msg->lParam = 0;
+                    }
                 }
             }
         }
