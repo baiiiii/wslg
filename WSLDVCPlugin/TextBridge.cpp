@@ -200,6 +200,7 @@ namespace
     HHOOK g_tsfHook = nullptr;
     bool g_tsfActivated = false;
 bool g_ownerAdvised = false;
+ITfDocumentMgr* g_appDocMgr = nullptr;
     bool g_sinkAdvised = false;
     bool g_watchdogStop = false;
     std::thread g_windowWatchdog;
@@ -2557,6 +2558,83 @@ bool g_ownerAdvised = false;
 
     // ------------------------------------------------------------------
 
+    class BridgeThreadMgrSink final : public ITfThreadMgrEventSink
+    {
+        LONG m_ref = 1;
+
+    public:
+        STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
+        {
+            if (!ppv)
+            {
+                return E_POINTER;
+            }
+            if (riid == IID_IUnknown || riid == IID_ITfThreadMgrEventSink)
+            {
+                *ppv = static_cast<ITfThreadMgrEventSink*>(this);
+            }
+            else
+            {
+                *ppv = nullptr;
+                return E_NOINTERFACE;
+            }
+            AddRef();
+            return S_OK;
+        }
+        STDMETHODIMP_(ULONG) AddRef() override
+        {
+            return InterlockedIncrement(&m_ref);
+        }
+        STDMETHODIMP_(ULONG) Release() override
+        {
+            ULONG r = InterlockedDecrement(&m_ref);
+
+            if (r == 0)
+            {
+                delete this;
+            }
+            return r;
+        }
+
+        STDMETHODIMP OnInitDocumentMgr(ITfDocumentMgr* pdim) override
+        {
+            (void)pdim;
+            return S_OK;
+        }
+        STDMETHODIMP OnUninitDocumentMgr(ITfDocumentMgr* pdim) override
+        {
+            (void)pdim;
+            return S_OK;
+        }
+        STDMETHODIMP OnSetFocus(ITfDocumentMgr* pdimFocus,
+                                ITfDocumentMgr* pdimPrevFocus) override
+        {
+            (void)pdimPrevFocus;
+            if (pdimFocus)
+            {
+                pdimFocus->AddRef();
+            }
+            if (g_appDocMgr)
+            {
+                g_appDocMgr->Release();
+            }
+            g_appDocMgr = pdimFocus;
+            BridgeLog(L"TextBridge: [tmsink] OnSetFocus doc=%p (ours=%d)\\n",
+                      (void*)pdimFocus, (pdimFocus == g_docMgr) ? 1 : 0);
+            return S_OK;
+        }
+        STDMETHODIMP OnPushContext(ITfContext* pic) override
+        {
+            (void)pic;
+            return S_OK;
+        }
+        STDMETHODIMP OnPopContext(ITfContext* pic) override
+        {
+            (void)pic;
+            return S_OK;
+        }
+    };
+
     // ------------------------------------------------------------------
     void
     ActivateTsfOnCurrentThread(HWND hwnd)
@@ -2668,6 +2746,23 @@ bool g_ownerAdvised = false;
             hr = tm->SetFocus(doc);
         }
         BridgeLog(L"TextBridge: Push/SetFocus(doc) hr=%x\n", hr);
+
+        {
+            ITfSource* tmSrc = nullptr;
+
+            if (SUCCEEDED(tm->QueryInterface(IID_ITfSource,
+                                             reinterpret_cast<void**>(&tmSrc))) && tmSrc)
+            {
+                BridgeThreadMgrSink* tms = new BridgeThreadMgrSink();
+                DWORD tmCookie = 0;
+                HRESULT hrTm = tmSrc->AdviseSink(IID_ITfThreadMgrEventSink,
+                                                 tms, &tmCookie);
+
+                BridgeLog(L"TextBridge: advise ThreadMgrEventSink hr=%x\\n", hrTm);
+                tms->Release();
+                tmSrc->Release();
+            }
+        }
 
 
 
