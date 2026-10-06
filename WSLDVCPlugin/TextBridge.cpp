@@ -2863,6 +2863,57 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
 
 
 
+        // 关键修复（候选窗定位）：把我们自己的 ITfContextOwner 注册到「我们创建的
+        // 这个上下文」上。CreateContext 的 punk 参数只接受文本存储，无法用来提供
+        // ITfContextOwner；而 AdviseOwnerOnAppContext 只作用于「应用自己的上下文」，
+        // store=0 时应用没有上下文，于是 owner 从未注册成功，输入法查不到
+        // ITfContextOwner::GetTextExt / GetScreenExt，只能把候选窗摆在默认位置
+        // —— 也就是窗口/屏幕左下角。
+        if (g_cfg.useOwner && g_owner)
+        {
+            ITfSource* ctxOwnerSrc = nullptr;
+
+            hr = ctx->QueryInterface(IID_ITfSource,
+                                     reinterpret_cast<void**>(&ctxOwnerSrc));
+            if (SUCCEEDED(hr) && ctxOwnerSrc)
+            {
+                DWORD ownerCookie = 0;
+                HRESULT hrOwn = ctxOwnerSrc->AdviseSink(
+                    IID_ITfContextOwner,
+                    static_cast<ITfContextOwner*>(g_owner), &ownerCookie);
+
+                BridgeLog(L"TextBridge: advise ITfContextOwner on own ctx hr=%x\n",
+                          hrOwn);
+                ctxOwnerSrc->Release();
+            }
+            else
+            {
+                BridgeLog(L"TextBridge: own ctx has no ITfSource hr=%x\n", hr);
+            }
+
+            // 备用路径：有些实现把 ITfContextOwner 挂在 thread manager 的
+            // ITfSource 上。两条都注册，靠日志判断哪条真正生效。
+            {
+                ITfSource* tmOwnerSrc = nullptr;
+
+                hr = tm->QueryInterface(IID_ITfSource,
+                                        reinterpret_cast<void**>(&tmOwnerSrc));
+                if (SUCCEEDED(hr) && tmOwnerSrc)
+                {
+                    DWORD ownerCookie2 = 0;
+                    HRESULT hrOwn2 = tmOwnerSrc->AdviseSink(
+                        IID_ITfContextOwner,
+                        static_cast<ITfContextOwner*>(g_owner), &ownerCookie2);
+
+                    BridgeLog(L"TextBridge: advise ITfContextOwner on thread "
+                              L"mgr hr=%x\n", hrOwn2);
+                    tmOwnerSrc->Release();
+                }
+            }
+        }
+
+
+
         if (g_cfg.useSink)
         {
             ITfSource* ctxSource = nullptr;
