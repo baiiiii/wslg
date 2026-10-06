@@ -199,6 +199,7 @@ namespace
     HWND g_railHwnd = nullptr;
     HHOOK g_tsfHook = nullptr;
     bool g_tsfActivated = false;
+bool g_ownerAdvised = false;
     bool g_sinkAdvised = false;
     bool g_watchdogStop = false;
     std::thread g_windowWatchdog;
@@ -548,44 +549,6 @@ namespace
             }
 
             g_threadMgr->SetFocus(g_docMgr);
-        }
-
-        if (g_threadMgr && g_owner)
-        {
-            ITfDocumentMgr* focus = nullptr;
-
-            if (SUCCEEDED(g_threadMgr->GetFocus(&focus)) && focus &&
-                focus != g_docMgr)
-            {
-                ITfContext* appCtx = nullptr;
-
-                if (SUCCEEDED(focus->GetTop(&appCtx)) && appCtx)
-                {
-                    ITfSource* src = nullptr;
-
-                    if (SUCCEEDED(appCtx->QueryInterface(
-                            IID_ITfSource, reinterpret_cast<void**>(&src))) && src)
-                    {
-                        DWORD cookie = 0;
-                        HRESULT hrOwn = src->AdviseSink(
-                            IID_ITfContextOwner,
-                            static_cast<ITfContextOwner*>(g_owner), &cookie);
-
-                        if (SUCCEEDED(hrOwn))
-                        {
-                            g_ownerAdvised = true;
-                        }
-
-                        BridgeLog(L"TextBridge: advise owner on app ctx hr=%x (%s)\\n",
-                                  hrOwn, why);
-                        src->Release();
-                    }
-
-                    appCtx->Release();
-                }
-
-                focus->Release();
-            }
         }
         SetImeKeyboardState(why);
         ReactivateInputProfile(why);
@@ -2532,6 +2495,50 @@ namespace
 
     BridgeContextOwner* g_owner = nullptr;
 
+    void
+    AdviseOwnerOnAppContext(const wchar_t* why)
+    {
+        ITfDocumentMgr* focus = nullptr;
+        ITfContext* appCtx = nullptr;
+        ITfSource* src = nullptr;
+        DWORD cookie = 0;
+        HRESULT hrOwn;
+
+        if (g_ownerAdvised || !g_threadMgr || !g_owner)
+        {
+            return;
+        }
+        if (FAILED(g_threadMgr->GetFocus(&focus)) || !focus || focus == g_docMgr)
+        {
+            if (focus)
+            {
+                focus->Release();
+            }
+            return;
+        }
+        if (FAILED(focus->GetTop(&appCtx)) || !appCtx)
+        {
+            focus->Release();
+            return;
+        }
+        if (SUCCEEDED(appCtx->QueryInterface(IID_ITfSource,
+                                             reinterpret_cast<void**>(&src))) && src)
+        {
+            hrOwn = src->AdviseSink(IID_ITfContextOwner,
+                                    static_cast<ITfContextOwner*>(g_owner),
+                                    &cookie);
+            if (SUCCEEDED(hrOwn))
+            {
+                g_ownerAdvised = true;
+            }
+            BridgeLog(L"TextBridge: advise owner on app ctx hr=%x (%s)\\n",
+                      hrOwn, why);
+            src->Release();
+        }
+        appCtx->Release();
+        focus->Release();
+    }
+
     // ------------------------------------------------------------------
 
     // ------------------------------------------------------------------
@@ -3218,6 +3225,10 @@ namespace
             if (iteration % 2 == 0 && g_docMgr && g_railHwnd)
             {
                 EnsureImeFocus(L"watchdog");
+                if (!g_ownerAdvised)
+                {
+                    AdviseOwnerOnAppContext(L"watchdog");
+                }
             }
             }
 
