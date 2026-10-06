@@ -531,8 +531,22 @@ namespace
                   why, transition ? 1 : 0, tsfOurs ? 1 : 0,
                   threadFocus ? 1 : 0);
 
-        if (g_threadMgr && g_docMgr && !tsfOurs)
+        if (g_threadMgr && g_docMgr && g_railHwnd)
         {
+            ITfDocumentMgr* prev = nullptr;
+
+            if (SUCCEEDED(g_threadMgr->AssociateFocus(g_railHwnd, g_docMgr,
+                                                &prev)))
+            {
+                BridgeLog(L"TextBridge: re-associated focus hwnd=%p (%s)\\n",
+                          (void*)g_railHwnd, why);
+            }
+
+            if (prev)
+            {
+                prev->Release();
+            }
+
             g_threadMgr->SetFocus(g_docMgr);
         }
         SetImeKeyboardState(why);
@@ -3162,6 +3176,11 @@ namespace
             if (iteration % 2 == 0)
             {
                 MaybeSwitchRailWindow();
+
+            if (iteration % 2 == 0 && g_docMgr && g_railHwnd)
+            {
+                EnsureImeFocus(L"watchdog");
+            }
             }
 
 
