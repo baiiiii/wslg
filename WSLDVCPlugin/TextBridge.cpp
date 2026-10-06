@@ -2499,39 +2499,26 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
     void
     AdviseOwnerOnAppContext(const wchar_t* why)
     {
-        ITfDocumentMgr* focus = nullptr;
         ITfContext* appCtx = nullptr;
         ITfSource* src = nullptr;
         DWORD cookie = 0;
         HRESULT hrOwn;
 
-        if (g_ownerAdvised)
+        if (g_ownerAdvised || !g_threadMgr || !g_appDocMgr)
         {
             return;
         }
-        if (!g_threadMgr)
+        if (g_appDocMgr == g_docMgr)
         {
             return;
         }
         if (!g_owner)
         {
             g_owner = new BridgeContextOwner();
-            BridgeLog(L"TextBridge: owner created on demand (%s)\\n", why);
         }
-        if (FAILED(g_threadMgr->GetFocus(&focus)) || !focus)
-        {
-            BridgeLog(L"TextBridge: owner advise: no focus (%s)\\n", why);
-            return;
-        }
-        if (focus == g_docMgr)
-        {
-            focus->Release();
-            return;
-        }
-        if (FAILED(focus->GetTop(&appCtx)) || !appCtx)
+        if (FAILED(g_appDocMgr->GetTop(&appCtx)) || !appCtx)
         {
             BridgeLog(L"TextBridge: owner advise: no top ctx (%s)\\n", why);
-            focus->Release();
             return;
         }
         if (SUCCEEDED(appCtx->QueryInterface(IID_ITfSource,
@@ -2553,7 +2540,6 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
             BridgeLog(L"TextBridge: owner advise: no ITfSource (%s)\\n", why);
         }
         appCtx->Release();
-        focus->Release();
     }
 
     // ------------------------------------------------------------------
