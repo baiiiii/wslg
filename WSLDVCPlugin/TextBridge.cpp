@@ -243,6 +243,11 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
 
     bool g_winFocused = false;
     int g_keyStreak = 0;
+
+    // 干扰抑制：组词/连续输入期间不得重新关联焦点或重新激活 TIP 配置，
+    // 否则会打断组词、清掉候选窗（表现为"候选窗时有时无"）。
+    DWORD g_lastKeyTick = 0;      // 最近一次可打印按键的时间
+    DWORD g_lastRestoreTick = 0;  // 最近一次完整 IME 状态恢复的时间
     int g_reactivations = 0;
     DWORD g_tsfThreadId = 0;
 
@@ -521,6 +526,27 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
         if (!focused || (!transition && tsfOurs))
         {
             return;
+        }
+
+        // ---- 干扰抑制（修复"候选窗时有时无"）----
+        // 1) 组词进行中：绝不重新关联焦点 / 重新激活配置，否则组词被打断、候选窗消失
+        if (g_compActive || g_activeComposition.get() != nullptr)
+        {
+            return;
+        }
+        // 2) 刚刚有可打印按键（<1.5s）：同样不打扰
+        {
+            const DWORD nowTick = GetTickCount();
+            if (g_lastKeyTick != 0 && (nowTick - g_lastKeyTick) < 1500)
+            {
+                return;
+            }
+            // 3) 冷却：完整恢复最多每 2 秒一次，避免看门狗每秒冲洗一次状态
+            if (g_lastRestoreTick != 0 && (nowTick - g_lastRestoreTick) < 2000)
+            {
+                return;
+            }
+            g_lastRestoreTick = nowTick;
         }
 
         BOOL threadFocus = FALSE;
@@ -2992,6 +3018,9 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
 
 
 
+                // 看门狗发出的 WM_NULL 是探测消息：仍然调用，但 EnsureImeFocus 内的
+                // 干扰抑制守卫会保证它只在"确实需要恢复"时才动作，
+                // 不会每秒冲洗一次 IME 状态（那会导致候选窗时有时无）。
                 EnsureImeFocus(msg->message == WM_NULL ? L"wakeup" : L"msg");
                 ApplyPendingCaret();
 
@@ -3017,6 +3046,7 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
                 if (msg->message == WM_KEYDOWN && g_tsfActivated &&
                     IsPrintableKey(msg->wParam))
                 {
+                    g_lastKeyTick = GetTickCount();
                     if (g_compActive)
                     {
                         g_keyStreak = 0;
