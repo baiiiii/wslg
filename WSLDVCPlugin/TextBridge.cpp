@@ -670,6 +670,10 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
         CANDIDATEFORM cand;
         COMPOSITIONFORM comp;
         BOOL okCand, okComp;
+        LONG exL = InterlockedCompareExchange(&g_textExtL, 0, 0);
+        LONG exT = InterlockedCompareExchange(&g_textExtT, 0, 0);
+        LONG exR = InterlockedCompareExchange(&g_textExtR, 0, 0);
+        LONG exB = InterlockedCompareExchange(&g_textExtB, 0, 0);
 
         himc = ImmGetContext(g_railHwnd);
         if (!himc)
@@ -685,9 +689,23 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
 
         memset(&cand, 0, sizeof(cand));
         cand.dwIndex = 0;
-        cand.dwStyle = CFS_CANDIDATEPOS;
-        cand.ptCurrentPos.x = sx;
-        cand.ptCurrentPos.y = sy;
+        if (exR > exL && exB > exT)
+        {
+            /* Ask the IME to keep its candidate window out of the caret line. */
+            cand.dwStyle = CFS_EXCLUDE;
+            cand.ptCurrentPos.x = sx;
+            cand.ptCurrentPos.y = sy;
+            cand.rcArea.left = exL;
+            cand.rcArea.top = exT;
+            cand.rcArea.right = exR;
+            cand.rcArea.bottom = exB;
+        }
+        else
+        {
+            cand.dwStyle = CFS_CANDIDATEPOS;
+            cand.ptCurrentPos.x = sx;
+            cand.ptCurrentPos.y = sy;
+        }
         okCand = ImmSetCandidateWindow(himc, &cand);
 
         memset(&comp, 0, sizeof(comp));
@@ -701,8 +719,9 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
         if (g_imePosApplied < 8 || g_cfg.verbose)
         {
             ++g_imePosApplied;
-            BridgeLog(L"TextBridge: IME window pos %d,%d (cand=%d comp=%d) #%d\n",
-                      sx, sy, (int)okCand, (int)okComp, g_imePosApplied);
+            BridgeLog(L"TextBridge: IME window pos %d,%d style=%d exclude=%ld,%ld,%ld,%ld (cand=%d comp=%d) #%d\n",
+                      sx, sy, (int)cand.dwStyle, (long)exL, (long)exT, (long)exR,
+                      (long)exB, (int)okCand, (int)okComp, g_imePosApplied);
         }
     }
 
@@ -1148,7 +1167,6 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
         /* inputSettings left as sent by weston (no bottom-edge alignment) */
 
         if (pid == 0x0308 && cbSize >= 6 + 20 + 36)
-        if (pid == 0x0308 && cbSize >= 6 + 20 + 36)
         {
             out[6 + 20 + 8] = 0;
             out[6 + 20 + 9] = 0;
@@ -1156,7 +1174,7 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
             out[6 + 20 + 11] = 0;
         }
 
-        BridgeLog(L"TextBridge: [spec] 0x%04x controlBounds -> window %ld,%ld,%ld,%ld\n",
+        BridgeLog(L"TextBridge: [spec] 0x%04x bounds kept as sent (window %ld,%ld,%ld,%ld)\n",
                   pid, (long)wr.left, (long)wr.top, (long)wr.right,
                   (long)wr.bottom);
 
