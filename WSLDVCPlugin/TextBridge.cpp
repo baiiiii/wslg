@@ -3267,6 +3267,19 @@ namespace
                         }
                     }
                 }
+                {
+                    static bool s_modeSubscribed = false;
+
+                    if (!s_modeSubscribed &&
+                        (pid == 0x0308 || pid == 0x0309 || pid == 0x030F))
+                    {
+                        s_modeSubscribed = true;
+                        SendUpdateMode(RDPTXT_FEATURE_LAYOUT_CHANGE_TRACKING |
+                                       RDPTXT_FEATURE_SELECTION_TRACKING, true);
+                        BridgeLog(L"TextBridge: [mode] subscribed LAYOUT+SELECTION tracking\\n");
+                    }
+                }
+
                 if (pid == 0x0308 && cbSize >= 6 + 20)
                 {
                     LONG c[4];
