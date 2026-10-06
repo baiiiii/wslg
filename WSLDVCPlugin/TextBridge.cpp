@@ -647,10 +647,6 @@ namespace
         InterlockedExchange(&g_textExtR, (LONG)right);
         InterlockedExchange(&g_textExtB, (LONG)bottom);
         InterlockedExchange(&g_textExtValid, 1);
-
-                        InterlockedExchange(&g_pendingCaretX, cx);
-                        InterlockedExchange(&g_pendingCaretY, cy);
-                        InterlockedExchange(&g_pendingCaret, 1);
         (void)src;
     }
 
@@ -3329,6 +3325,10 @@ namespace
                         InterlockedExchange(&g_textExtB, cy);
                         InterlockedExchange(&g_textExtValid, 1);
 
+
+                        InterlockedExchange(&g_pendingCaretX, cx);
+                        InterlockedExchange(&g_pendingCaretY, cy);
+                        InterlockedExchange(&g_pendingCaret, 1);
                         BridgeLog(L"TextBridge: [caret] derived %ld,%ld,%ld,%ld from ctrl %ld,%ld,%ld,%ld\\n",
                                   (long)(cx - 2), (long)(cy - 40), (long)(cx + 2), (long)cy,
                                   (long)c[0], (long)c[1], (long)c[2], (long)c[3]);
