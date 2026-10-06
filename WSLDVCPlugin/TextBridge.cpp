@@ -670,10 +670,6 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
         CANDIDATEFORM cand;
         COMPOSITIONFORM comp;
         BOOL okCand, okComp;
-        LONG exL = InterlockedCompareExchange(&g_textExtL, 0, 0);
-        LONG exT = InterlockedCompareExchange(&g_textExtT, 0, 0);
-        LONG exR = InterlockedCompareExchange(&g_textExtR, 0, 0);
-        LONG exB = InterlockedCompareExchange(&g_textExtB, 0, 0);
 
         himc = ImmGetContext(g_railHwnd);
         if (!himc)
@@ -689,23 +685,9 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
 
         memset(&cand, 0, sizeof(cand));
         cand.dwIndex = 0;
-        if (exR > exL && exB > exT)
-        {
-            /* Ask the IME to keep its candidate window out of the caret line. */
-            cand.dwStyle = CFS_EXCLUDE;
-            cand.ptCurrentPos.x = sx;
-            cand.ptCurrentPos.y = sy;
-            cand.rcArea.left = exL;
-            cand.rcArea.top = exT;
-            cand.rcArea.right = exR;
-            cand.rcArea.bottom = exB;
-        }
-        else
-        {
-            cand.dwStyle = CFS_CANDIDATEPOS;
-            cand.ptCurrentPos.x = sx;
-            cand.ptCurrentPos.y = sy;
-        }
+        cand.dwStyle = CFS_CANDIDATEPOS;
+        cand.ptCurrentPos.x = sx;
+        cand.ptCurrentPos.y = sy;
         okCand = ImmSetCandidateWindow(himc, &cand);
 
         memset(&comp, 0, sizeof(comp));
@@ -719,9 +701,8 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
         if (g_imePosApplied < 8 || g_cfg.verbose)
         {
             ++g_imePosApplied;
-            BridgeLog(L"TextBridge: IME window pos %d,%d style=%d exclude=%ld,%ld,%ld,%ld (cand=%d comp=%d) #%d\n",
-                      sx, sy, (int)cand.dwStyle, (long)exL, (long)exT, (long)exR,
-                      (long)exB, (int)okCand, (int)okComp, g_imePosApplied);
+            BridgeLog(L"TextBridge: IME window pos %d,%d (cand=%d comp=%d) #%d\n",
+                      sx, sy, (int)okCand, (int)okComp, g_imePosApplied);
         }
     }
 
@@ -2040,8 +2021,6 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
 
         STDMETHODIMP GetScreenExt(TsViewCookie vcView, RECT* prc) override
         {
-            RECT r;
-
             (void)vcView;
 
             if (!prc)
@@ -2049,20 +2028,7 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
                 return E_INVALIDARG;
             }
 
-            r.left = InterlockedCompareExchange(&g_textExtL, 0, 0);
-            r.top = InterlockedCompareExchange(&g_textExtT, 0, 0);
-            r.right = InterlockedCompareExchange(&g_textExtR, 0, 0);
-            r.bottom = InterlockedCompareExchange(&g_textExtB, 0, 0);
-
-            if (r.right <= r.left || r.bottom <= r.top)
-            {
-                r = RailWindowRect();
-            }
-
-            BridgeLog(L"TextBridge: store GetScreenExt -> %ld,%ld,%ld,%ld\n",
-                      r.left, r.top, r.right, r.bottom);
-
-            *prc = r;
+            *prc = RailWindowRect();
 
             return S_OK;
         }
@@ -2483,41 +2449,18 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
 
         STDMETHODIMP GetScreenExt(RECT* prc) override
         {
-            RECT r;
-            RECT caret;
+            const HWND app = CurrentAppWindow();
 
             if (!prc)
             {
                 return E_INVALIDARG;
             }
-
-            /* Report the caret line as the view extent so that the IME,
-               which clamps its candidate window into this rectangle, is
-               forced to keep the candidate next to the caret. */
-            if (CaretRectScreen(&caret))
+            if (app && GetWindowRect(app, prc))
             {
-                r = caret;
-            }
-            else
-            {
-                const HWND app = CurrentAppWindow();
-
-                if (!app || !GetWindowRect(app, &r))
-                {
-                    return E_FAIL;
-                }
+                return S_OK;
             }
 
-            if (g_textExtCalls < 12 || g_cfg.verbose)
-            {
-                ++g_textExtCalls;
-                BridgeLog(L"TextBridge: GetScreenExt -> %ld,%ld,%ld,%ld #%d\n",
-                          r.left, r.top, r.right, r.bottom, g_textExtCalls);
-            }
-
-            *prc = r;
-
-            return S_OK;
+            return E_FAIL;
         }
 
         STDMETHODIMP GetStatus(TF_STATUS* pdcs) override
