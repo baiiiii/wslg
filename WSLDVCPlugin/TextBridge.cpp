@@ -226,6 +226,7 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
     volatile LONG g_docLen = 0;
     volatile LONG g_textExtL = 0, g_textExtT = 0, g_textExtR = 0, g_textExtB = 0;
     int g_textExtCalls = 0;
+    int g_ownerExtCalls = 0;
     std::wstring g_lastPreedit;
     std::wstring g_baseDoc;
     std::wstring g_lastCommitDoc;
@@ -2550,16 +2551,24 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
             {
                 *pfClipped = FALSE;
             }
-            if (InterlockedCompareExchange(&g_textExtValid, 1, 1) == 0 ||
-                !CaretRectScreen(&r))
+            // 注意：不能再对 g_textExtValid 短路 —— 那个标志只有 EDIT_CONTROL_FOCUS
+            // 到达后才会置位，一旦它还是 0 就返回 E_FAIL，TSF 便退回默认锚点，
+            // 候选窗就会跑到窗口/屏幕底部。CaretRectScreen 自己有多级兜底。
+            if (!CaretRectScreen(&r))
             {
+                if (g_textExtCalls < 12 || g_cfg.verbose)
+                {
+                    ++g_textExtCalls;
+                    BridgeLog(L"TextBridge: owner GetTextExt -> E_FAIL "
+                              L"(no caret source) #%d\n", g_textExtCalls);
+                }
                 return E_FAIL;
             }
             *prc = r;
             if (g_textExtCalls < 12 || g_cfg.verbose)
             {
                 ++g_textExtCalls;
-                BridgeLog(L"TextBridge: GetTextExt -> %ld,%ld,%ld,%ld #%d\n",
+                BridgeLog(L"TextBridge: owner GetTextExt -> %ld,%ld,%ld,%ld #%d\n",
                           r.left, r.top, r.right, r.bottom, g_textExtCalls);
             }
             return S_OK;
@@ -2573,8 +2582,44 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
             {
                 return E_INVALIDARG;
             }
+
+            // 候选窗锚点关键点：过去这里返回整个应用窗口，输入法便把候选窗
+            // 摆到该矩形的底部（屏幕左下角）。改为优先返回"光标附近的小矩形"，
+            // 让输入法把候选窗锚在光标处；只有在光标未知时才退回应用窗口。
+            {
+                RECT cr;
+
+                if (CaretRectScreen(&cr))
+                {
+                    RECT sr;
+                    sr.left = cr.left - 2;
+                    sr.top = cr.top;
+                    sr.right = cr.right + 2;
+                    sr.bottom = cr.bottom + 24;
+
+                    if (g_ownerExtCalls < 12 || g_cfg.verbose)
+                    {
+                        ++g_ownerExtCalls;
+                        BridgeLog(L"TextBridge: owner GetScreenExt -> caret rect "
+                                  L"%ld,%ld,%ld,%ld #%d\n",
+                                  sr.left, sr.top, sr.right, sr.bottom,
+                                  g_ownerExtCalls);
+                    }
+                    *prc = sr;
+                    return S_OK;
+                }
+            }
+
             if (app && GetWindowRect(app, prc))
             {
+                if (g_ownerExtCalls < 12 || g_cfg.verbose)
+                {
+                    ++g_ownerExtCalls;
+                    BridgeLog(L"TextBridge: owner GetScreenExt -> app window "
+                              L"%ld,%ld,%ld,%ld #%d\n",
+                              prc->left, prc->top, prc->right, prc->bottom,
+                              g_ownerExtCalls);
+                }
                 return S_OK;
             }
 
