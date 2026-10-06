@@ -2040,10 +2040,30 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
 
         STDMETHODIMP GetScreenExt(TsViewCookie vcView, RECT* prc) override
         {
-            BridgeLog(L"TextBridge: IME querying GetScreenExt\n");
+            RECT r;
+
             (void)vcView;
-            if (!prc) return E_INVALIDARG;
-            *prc = RailWindowRect();
+
+            if (!prc)
+            {
+                return E_INVALIDARG;
+            }
+
+            r.left = InterlockedCompareExchange(&g_textExtL, 0, 0);
+            r.top = InterlockedCompareExchange(&g_textExtT, 0, 0);
+            r.right = InterlockedCompareExchange(&g_textExtR, 0, 0);
+            r.bottom = InterlockedCompareExchange(&g_textExtB, 0, 0);
+
+            if (r.right <= r.left || r.bottom <= r.top)
+            {
+                r = RailWindowRect();
+            }
+
+            BridgeLog(L"TextBridge: store GetScreenExt -> %ld,%ld,%ld,%ld\n",
+                      r.left, r.top, r.right, r.bottom);
+
+            *prc = r;
+
             return S_OK;
         }
 
