@@ -260,6 +260,13 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
     volatile LONG g_pendingCaretX = 0;
     volatile LONG g_pendingCaretY = 0;
     volatile LONG g_pendingCaret = 0;
+
+    // ApplyPendingCaret 算出的最终光标（物理像素，已钳制在应用窗口内）。
+    // GetTextExt 必须用它，否则会退化成"整个窗口"，输入法就把候选窗
+    // 摆到窗口底部（表现为候选窗跑到屏幕左下角）。
+    volatile LONG g_lastCaretX = 0;
+    volatile LONG g_lastCaretY = 0;
+    volatile LONG g_lastCaretValid = 0;
     bool g_caretCreated = false;
     int g_caretApplied = 0;
 
@@ -788,6 +795,11 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
 
 
         ApplyImeWindowPos(sx, sy);
+
+        // 记录最终光标，供 ITextStoreACP::GetTextExt 返回（关键：候选窗定位依据）
+        InterlockedExchange(&g_lastCaretX, (LONG)sx);
+        InterlockedExchange(&g_lastCaretY, (LONG)sy);
+        InterlockedExchange(&g_lastCaretValid, 1);
 
         if (!g_caretCreated)
         {
@@ -2063,6 +2075,7 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
                                 LONG acpEnd, RECT* prc, BOOL* pfClipped) override
         {
             RECT r;
+            const wchar_t* src = L"cached";
 
             (void)vcView; (void)acpStart; (void)acpEnd;
 
@@ -2081,10 +2094,31 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
                 GUITHREADINFO gti;
                 bool have = false;
 
+                // ① 优先用 ApplyPendingCaret 算出的光标（它来自 EDIT_CONTROL_FOCUS /
+                //    GEOMETRY_CHANGED 并已钳制在应用窗口内）。这是候选窗能否跟随
+                //    光标的关键：缺了这一步就会退化成"整个窗口"。
+                if (InterlockedCompareExchange(&g_lastCaretValid, 0, 0) != 0)
+                {
+                    const LONG lx = InterlockedCompareExchange(&g_lastCaretX, 0, 0);
+                    const LONG ly = InterlockedCompareExchange(&g_lastCaretY, 0, 0);
+
+                    if (lx > 0 && ly > 0)
+                    {
+                        r.left = lx - 2;
+                        r.top = ly - 24;
+                        r.right = lx + 2;
+                        r.bottom = ly;
+                        have = true;
+                        src = L"lastcaret";
+                    }
+                }
+
+                // ② 退而求其次：线程真实插入符
                 memset(&gti, 0, sizeof(gti));
                 gti.cbSize = sizeof(gti);
 
-                if (g_railHwnd && GetGUIThreadInfo(GetWindowThreadProcessId(g_railHwnd, nullptr), &gti) &&
+                if (!have && g_railHwnd &&
+                    GetGUIThreadInfo(GetWindowThreadProcessId(g_railHwnd, nullptr), &gti) &&
                     gti.hwndCaret)
                 {
                     POINT tl;
@@ -2102,17 +2136,19 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
                         r.right = br.x;
                         r.bottom = br.y;
                         have = true;
+                        src = L"guithreadinfo";
                     }
                 }
 
                 if (!have)
                 {
                     r = RailWindowRect();
+                    src = L"WINDOW-FALLBACK";
                 }
             }
 
-            BridgeLog(L"TextBridge: store GetTextExt -> %ld,%ld,%ld,%ld\\n",
-                      r.left, r.top, r.right, r.bottom);
+            BridgeLog(L"TextBridge: store GetTextExt -> %ld,%ld,%ld,%ld (%s)\n",
+                      r.left, r.top, r.right, r.bottom, src);
 
             *prc = r;
             *pfClipped = FALSE;
