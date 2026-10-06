@@ -1813,6 +1813,7 @@ namespace
         STDMETHODIMP SetSelection(ULONG ulCount,
                                   const TS_SELECTION_ACP* pSelection) override
         {
+            BridgeLog(L"TextBridge: [store] SetSelection called\n");
             if (!pSelection || ulCount < 1) return E_INVALIDARG;
             selStart = pSelection[0].acpStart;
             selEnd = pSelection[0].acpEnd;
@@ -2139,6 +2140,7 @@ namespace
         STDMETHODIMP OnEndEdit(ITfContext* pic, TfEditCookie ecReadOnly,
                                ITfEditRecord* pEditRecord) override
         {
+            BridgeLog(L"TextBridge: [sink] OnEndEdit fired\n");
 
             if (g_textStore && !g_textStore->inserted.empty())
                 g_pendingCommitText = g_textStore->inserted;
