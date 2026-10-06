@@ -3,6 +3,8 @@
 #include "pch.h"
 #include "WSLDVCPlugin.h"
 #include "WSLDVCListenerCallback.h"
+#include "TextBridge.h"
+#include "utils.h"
 
 //
 // Using Windows Runtime C++ Template Library(WRL) to implement COM objects.
@@ -40,6 +42,14 @@ public:
         if (SUCCEEDED(hr))
         {
             hr = pChannelMgr->CreateListener(DVC_NAME, 0, spListenerCallback.Get(), &spListener);
+        }
+        if (SUCCEEDED(hr))
+        {
+            HRESULT hrBridge = TextBridge::Start(pChannelMgr);
+            if (FAILED(hrBridge))
+            {
+                DebugPrint(L"TextBridge::Start failed hr=%x (text input virtualization disabled)\n", hrBridge);
+            }
         }
 
         return hr;
