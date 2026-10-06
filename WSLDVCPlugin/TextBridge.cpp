@@ -549,6 +549,44 @@ namespace
 
             g_threadMgr->SetFocus(g_docMgr);
         }
+
+        if (g_threadMgr && g_owner)
+        {
+            ITfDocumentMgr* focus = nullptr;
+
+            if (SUCCEEDED(g_threadMgr->GetFocus(&focus)) && focus &&
+                focus != g_docMgr)
+            {
+                ITfContext* appCtx = nullptr;
+
+                if (SUCCEEDED(focus->GetTop(&appCtx)) && appCtx)
+                {
+                    ITfSource* src = nullptr;
+
+                    if (SUCCEEDED(appCtx->QueryInterface(
+                            IID_ITfSource, reinterpret_cast<void**>(&src))) && src)
+                    {
+                        DWORD cookie = 0;
+                        HRESULT hrOwn = src->AdviseSink(
+                            IID_ITfContextOwner,
+                            static_cast<ITfContextOwner*>(g_owner), &cookie);
+
+                        if (SUCCEEDED(hrOwn))
+                        {
+                            g_ownerAdvised = true;
+                        }
+
+                        BridgeLog(L"TextBridge: advise owner on app ctx hr=%x (%s)\\n",
+                                  hrOwn, why);
+                        src->Release();
+                    }
+
+                    appCtx->Release();
+                }
+
+                focus->Release();
+            }
+        }
         SetImeKeyboardState(why);
         ReactivateInputProfile(why);
         g_keyStreak = 0;
