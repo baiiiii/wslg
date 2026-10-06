@@ -3518,13 +3518,13 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
                     s_lastRail = g_railHwnd;
                     InterlockedExchange(&g_gotGeom, 0);
 
+                    // 注意：这里过去会一并清空 g_textExt*。那会在 RAIL 窗口切换后
+                    // 制造一段"没有任何光标来源"的空窗，于是
+                    // ITfContextOwner::GetTextExt 返回 E_FAIL，输入法立刻把候选窗
+                    // 甩回默认位置（窗口/屏幕左下角）。这些值来自服务端下发的
+                    // 控制框/几何信息、会自行刷新，保留最后一次已知值远好于清空。
                     InterlockedExchange(&g_geomCaretR, 0);
                     InterlockedExchange(&g_geomCaretB, 0);
-                    InterlockedExchange(&g_textExtValid, 0);
-                    InterlockedExchange(&g_textExtL, 0);
-                    InterlockedExchange(&g_textExtT, 0);
-                    InterlockedExchange(&g_textExtR, 0);
-                    InterlockedExchange(&g_textExtB, 0);
                 }
             }
             if (g_cfg.syncGeom && g_tsfActivated && !g_gotGeom &&
