@@ -647,6 +647,10 @@ namespace
         InterlockedExchange(&g_textExtR, (LONG)right);
         InterlockedExchange(&g_textExtB, (LONG)bottom);
         InterlockedExchange(&g_textExtValid, 1);
+
+                        InterlockedExchange(&g_pendingCaretX, cx);
+                        InterlockedExchange(&g_pendingCaretY, cy);
+                        InterlockedExchange(&g_pendingCaret, 1);
         (void)src;
     }
 
