@@ -2413,24 +2413,80 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
     bool
     CaretRectScreen(RECT* out)
     {
-        if (!out || InterlockedCompareExchange(&g_textExtValid, 1, 1) == 0)
+        if (!out)
         {
             return false;
         }
-        out->left = InterlockedCompareExchange(&g_textExtL, 0, 0);
-        out->top = InterlockedCompareExchange(&g_textExtT, 0, 0);
-        out->right = InterlockedCompareExchange(&g_textExtR, 0, 0);
-        out->bottom = InterlockedCompareExchange(&g_textExtB, 0, 0);
-        if (out->bottom <= out->top)
-        {
 
-            out->bottom = out->top + 20;
-        }
-        if (out->right <= out->left)
+        // ① 首选：EDIT_CONTROL_FOCUS / GEOMETRY_CHANGED 算出的文本范围
+        if (InterlockedCompareExchange(&g_textExtValid, 1, 1) != 0)
         {
-            out->right = out->left + 1;
+            out->left = InterlockedCompareExchange(&g_textExtL, 0, 0);
+            out->top = InterlockedCompareExchange(&g_textExtT, 0, 0);
+            out->right = InterlockedCompareExchange(&g_textExtR, 0, 0);
+            out->bottom = InterlockedCompareExchange(&g_textExtB, 0, 0);
+            if (out->bottom <= out->top)
+            {
+                out->bottom = out->top + 20;
+            }
+            if (out->right <= out->left)
+            {
+                out->right = out->left + 1;
+            }
+            return true;
         }
-        return true;
+
+        // ② 其次：ApplyPendingCaret 已经算好的最终光标。
+        //    这一层非常关键：没有它时 GetTextExt 会返回 E_FAIL，
+        //    TSF 便退回默认位置，候选窗就跑到窗口/屏幕底部去了。
+        if (InterlockedCompareExchange(&g_lastCaretValid, 0, 0) != 0)
+        {
+            const LONG lx = InterlockedCompareExchange(&g_lastCaretX, 0, 0);
+            const LONG ly = InterlockedCompareExchange(&g_lastCaretY, 0, 0);
+
+            if (lx > 0 && ly > 0)
+            {
+                out->left = lx - 2;
+                out->top = ly - 24;
+                out->right = lx + 2;
+                out->bottom = ly;
+                return true;
+            }
+        }
+
+        // ③ 再次：线程真实插入符
+        if (g_railHwnd)
+        {
+            GUITHREADINFO gti;
+
+            memset(&gti, 0, sizeof(gti));
+            gti.cbSize = sizeof(gti);
+
+            if (GetGUIThreadInfo(GetWindowThreadProcessId(g_railHwnd, nullptr), &gti) &&
+                gti.hwndCaret)
+            {
+                POINT tl;
+                POINT br;
+
+                tl.x = gti.rcCaret.left;
+                tl.y = gti.rcCaret.top;
+                br.x = gti.rcCaret.right;
+                br.y = gti.rcCaret.bottom;
+
+                if (ClientToScreen(gti.hwndCaret, &tl) && ClientToScreen(gti.hwndCaret, &br))
+                {
+                    out->left = tl.x;
+                    out->top = tl.y;
+                    out->right = br.x;
+                    out->bottom = br.y;
+                    if (out->bottom <= out->top) out->bottom = out->top + 20;
+                    if (out->right <= out->left) out->right = out->left + 1;
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     class BridgeContextOwner : public ITfContextOwner
