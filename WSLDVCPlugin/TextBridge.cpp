@@ -2483,17 +2483,41 @@ ITfDocumentMgr* g_appDocMgr = nullptr;
 
         STDMETHODIMP GetScreenExt(RECT* prc) override
         {
+            RECT r;
+            RECT caret;
+
             if (!prc)
             {
                 return E_INVALIDARG;
             }
-            const HWND app = CurrentAppWindow();
 
-            if (app && GetWindowRect(app, prc))
+            /* Report the caret line as the view extent so that the IME,
+               which clamps its candidate window into this rectangle, is
+               forced to keep the candidate next to the caret. */
+            if (CaretRectScreen(&caret))
             {
-                return S_OK;
+                r = caret;
             }
-            return E_FAIL;
+            else
+            {
+                const HWND app = CurrentAppWindow();
+
+                if (!app || !GetWindowRect(app, &r))
+                {
+                    return E_FAIL;
+                }
+            }
+
+            if (g_textExtCalls < 12 || g_cfg.verbose)
+            {
+                ++g_textExtCalls;
+                BridgeLog(L"TextBridge: GetScreenExt -> %ld,%ld,%ld,%ld #%d\n",
+                          r.left, r.top, r.right, r.bottom, g_textExtCalls);
+            }
+
+            *prc = r;
+
+            return S_OK;
         }
 
         STDMETHODIMP GetStatus(TF_STATUS* pdcs) override
