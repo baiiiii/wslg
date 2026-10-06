@@ -2504,20 +2504,32 @@ bool g_ownerAdvised = false;
         DWORD cookie = 0;
         HRESULT hrOwn;
 
-        if (g_ownerAdvised || !g_threadMgr || !g_owner)
+        if (g_ownerAdvised)
         {
             return;
         }
-        if (FAILED(g_threadMgr->GetFocus(&focus)) || !focus || focus == g_docMgr)
+        if (!g_threadMgr)
         {
-            if (focus)
-            {
-                focus->Release();
-            }
+            return;
+        }
+        if (!g_owner)
+        {
+            g_owner = new BridgeContextOwner();
+            BridgeLog(L"TextBridge: owner created on demand (%s)\\n", why);
+        }
+        if (FAILED(g_threadMgr->GetFocus(&focus)) || !focus)
+        {
+            BridgeLog(L"TextBridge: owner advise: no focus (%s)\\n", why);
+            return;
+        }
+        if (focus == g_docMgr)
+        {
+            focus->Release();
             return;
         }
         if (FAILED(focus->GetTop(&appCtx)) || !appCtx)
         {
+            BridgeLog(L"TextBridge: owner advise: no top ctx (%s)\\n", why);
             focus->Release();
             return;
         }
@@ -2534,6 +2546,10 @@ bool g_ownerAdvised = false;
             BridgeLog(L"TextBridge: advise owner on app ctx hr=%x (%s)\\n",
                       hrOwn, why);
             src->Release();
+        }
+        else
+        {
+            BridgeLog(L"TextBridge: owner advise: no ITfSource (%s)\\n", why);
         }
         appCtx->Release();
         focus->Release();
